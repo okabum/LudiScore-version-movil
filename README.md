@@ -22,6 +22,7 @@ Dado que la aplicación es gratuita y no muestra publicidad, no utilizamos redes
 Sin embargo, la aplicación se distribuye a través de Google Play Store, por lo que su uso está sujeto también a la política de privacidad de Google Play Services en lo referente a la descarga e instalación.
 
     Política de Privacidad de Google Play Services
+    https://policies.google.com/privacy
 
 4. Seguridad de los Datos
 
