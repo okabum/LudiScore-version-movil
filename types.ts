@@ -14,7 +14,7 @@ export interface Player {
   color: string;
 }
 
-export type ViewState = 'START' | 'LIST' | 'SCORING' | 'SETTINGS' | 'VICTORY';
+export type ViewState = 'START' | 'LIST' | 'SCORING' | 'SETTINGS' | 'VICTORY' | 'QUICK_GAME';
 
 export interface GameSettings {
   targetScore: number | null; // null means no limit

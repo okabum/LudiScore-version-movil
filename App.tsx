@@ -1,11 +1,21 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { Plus, Settings, Trophy, UserPlus, ArrowLeft, History, RotateCcw, User, Crown, X, Trash2, AlertTriangle, ChevronLeft, ChevronRight, Check, Save, Download, Archive, Clock, Library, LayoutTemplate, Pencil, Folder, Dices, CreditCard, Box, Users, Sun, Moon, Monitor, Zap, Keyboard, Info, Play, Edit, Languages, Globe, CheckCircle2, FileSearch, Hourglass, Share2, Flag, ArrowUp, ArrowDown, ArrowUpDown, Castle, Pause, Disc, Coins, Lock, LogOut, Timer, ShoppingBag, Coffee } from 'lucide-react';
+import { App as CapacitorApp } from '@capacitor/app';
 import { Player, ViewState, Turn, GameSettings, SavedGame, GamePreset, PresetCategory } from './types';
-import { Button } from './components/Button';
-import { Keypad } from './components/Keypad';
 import { AboutModal } from './components/AboutModal';
 import { Language, LANGUAGES, TRANSLATIONS } from './translations';
+
+// Components
+import { SplashScreen } from './components/SplashScreen';
+import { ConfirmationModal } from './components/ConfirmationModal';
+import { PlayerHistoryModal } from './components/PlayerHistoryModal';
+import { ExtrasModal } from './components/ExtrasModal';
+import { PlayerDialog } from './components/PlayerDialog';
+import { SetupWizard } from './components/SetupWizard';
+import { StartScreen } from './components/StartScreen';
+import { ListScreen } from './components/ListScreen';
+import { ScoringScreen } from './components/ScoringScreen';
+import { VictoryScreen } from './components/VictoryScreen';
+import { QuickGameScreen } from './components/QuickGameScreen';
 
 // --- CONSTANTS & CONFIG ---
 
@@ -128,7 +138,6 @@ export default function App() {
   const [showSaveNotification, setShowSaveNotification] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
-
   // Setup Wizard State
   const [setupWizard, setSetupWizard] = useState<{
     step: 'COUNT' | 'DETAILS';
@@ -146,11 +155,12 @@ export default function App() {
 
   // Extras State
   const [isExtrasOpen, setIsExtrasOpen] = useState(false);
-  const [activeTool, setActiveTool] = useState<'MENU' | 'DICE' | 'TIMER' | 'PICKER' | 'CHESS' | 'COIN'>('MENU');
+  const [activeTool, setActiveTool] = useState<'MENU' | 'DICE' | 'TIMER' | 'PICKER' | 'CHESS' | 'COIN' | 'FINGER'>('MENU');
   
   // Tool States
   const [diceSides, setDiceSides] = useState(6);
-  const [diceValue, setDiceValue] = useState(6);
+  const [diceCount, setDiceCount] = useState(1);
+  const [diceResults, setDiceResults] = useState<number[]>([6]);
   const [isRolling, setIsRolling] = useState(false);
   
   const [pickerId, setPickerId] = useState<string | null>(null);
@@ -183,16 +193,17 @@ export default function App() {
   const [chessTurnStartTime, setChessTurnStartTime] = useState(0); // For Bronstein calc
   const [isChessResumed, setIsChessResumed] = useState(false); // Track if current game is resumed
   
-  // Suspended Chess State - Now a Record keyed by mode
+  // Audio Context Ref
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  
+  // Suspended Chess State
   const [suspendedChessState, setSuspendedChessState] = useState<Record<string, any>>(() => {
       try {
         const saved = localStorage.getItem('sm_suspended_chess');
         if (!saved) return {};
         const parsed = JSON.parse(saved);
-        // Simple check to see if it's the old format (flat object) vs new format (dictionary)
-        // Old format had 'time1', new format has keys like 'STANDARD', 'GONG'
         if (parsed && typeof parsed.time1 === 'number') {
-            return {}; // Discard old incompatible format to avoid bugs
+            return {}; 
         }
         return parsed || {};
       } catch (e) {
@@ -220,21 +231,67 @@ export default function App() {
     payload?: any;
   }>({ isOpen: false, type: null });
 
-  // Refs for scrolling
-  const scoringPlayerScrollRef = useRef<HTMLDivElement>(null);
-
   // Translation Helper
   const t = (key: keyof typeof TRANSLATIONS['es']) => {
     // @ts-ignore
     return TRANSLATIONS[language]?.[key] || TRANSLATIONS['es'][key] || key;
   };
 
+  // Hardware Back Button Handling for Android
+  useEffect(() => {
+    let backButtonListener: any;
+    
+    // Check if we are running in a Capacitor Native environment
+    if ((window as any).Capacitor?.isNative) {
+      CapacitorApp.addListener('backButton', ({ canGoBack }) => {
+        // Priority 1: Close Modals and Overlays
+        if (isExtrasOpen) { setIsExtrasOpen(false); return; }
+        if (isAboutOpen) { setIsAboutOpen(false); return; }
+        if (isPlayerHistoryOpen) { setIsPlayerHistoryOpen(false); return; }
+        if (setupWizard) { setSetupWizard(null); return; }
+        if (isPresetsOpen) { setIsPresetsOpen(false); return; }
+        if (isLangMenuOpen) { setIsLangMenuOpen(false); return; }
+        
+        // Handle Dialogs (standard HTML dialog)
+        const openDialog = document.querySelector('dialog[open]');
+        if (openDialog) {
+             (openDialog as HTMLDialogElement).close();
+             return;
+        }
+
+        // Priority 2: Navigation Logic
+        if (view === 'SCORING') { setView('LIST'); return; }
+        if (view === 'VICTORY') { setView('LIST'); return; }
+        if (view === 'QUICK_GAME') { setView('START'); return; }
+        
+        if (view === 'LIST') { 
+            // Return to start if in list view
+            setView('START'); 
+            return; 
+        }
+
+        // Priority 3: Exit App (Only on Start Screen)
+        if (view === 'START') {
+             CapacitorApp.exitApp();
+        }
+      }).then(listener => {
+          backButtonListener = listener;
+      });
+    }
+
+    return () => {
+        if (backButtonListener) {
+            backButtonListener.remove();
+        }
+    };
+  }, [
+    isExtrasOpen, isAboutOpen, isPlayerHistoryOpen, setupWizard, isPresetsOpen, isLangMenuOpen,
+    view
+  ]);
+
   // Helper to determine active player ID based on history length (Deterministic)
   const getActivePlayerId = () => {
       if (players.length === 0) return null;
-      // Calculate total turns across all players to find whose turn it is
-      // This assumes strict turn order 0, 1, 2, 0, 1, 2...
-      // However, if we just want "who is next", it's usually (total turns) % count
       const totalTurns = players.reduce((sum, p) => sum + p.history.length, 0);
       return players[totalTurns % players.length].id;
   };
@@ -242,23 +299,21 @@ export default function App() {
   const getPlayerInitials = (name: string) => {
       const parts = name.trim().split(/\s+/).filter(p => p.length > 0);
       if (parts.length === 0) return '?';
-      
-      // If 3 or more words, take first letter of first 3 words
       if (parts.length >= 3) {
           return (parts[0][0] + parts[1][0] + parts[2][0]).toUpperCase();
       }
-
-      // Check for name + number pattern (e.g. "Jugador 10")
       const lastPart = parts[parts.length - 1];
       if (parts.length > 1 && /^\d+$/.test(lastPart)) {
           return (parts[0][0] + lastPart).toUpperCase().slice(0, 3);
       }
-
       if (parts.length === 2) {
            return (parts[0][0] + parts[1][0]).toUpperCase();
       }
-
       return parts[0].slice(0, 3).toUpperCase();
+  };
+
+  const generateRandomColor = () => {
+      return '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
   };
 
   const triggerToast = (msg: string) => {
@@ -266,28 +321,44 @@ export default function App() {
       setShowSaveNotification(true);
       setTimeout(() => setShowSaveNotification(false), 2500);
   };
+  
+  // Audio Helper to reuse context
+  const getAudioContext = () => {
+      if (!audioCtxRef.current) {
+          const AudioCtor = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioCtor) {
+              audioCtxRef.current = new AudioCtor();
+          }
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume().catch(() => {});
+      }
+      return audioCtxRef.current;
+  };
 
   const playAlarm = () => {
       try {
-          const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-          if (!AudioContext) return;
-          const ctx = new AudioContext();
-          if (ctx.state === 'suspended') ctx.resume();
+          const ctx = getAudioContext();
+          if (!ctx) return;
           
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.connect(gain);
-          gain.connect(ctx.destination);
+          const now = ctx.currentTime;
           
-          // Simple clean beep
-          osc.type = 'sine';
-          osc.frequency.setValueAtTime(600, ctx.currentTime); 
-          
-          gain.gain.setValueAtTime(0.3, ctx.currentTime);
-          gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.2);
-          
-          osc.start();
-          osc.stop(ctx.currentTime + 0.2);
+          // Double Beep
+          [0, 0.4].forEach(offset => {
+              const osc = ctx.createOscillator();
+              const gain = ctx.createGain();
+              osc.connect(gain);
+              gain.connect(ctx.destination);
+              
+              osc.type = 'sine';
+              osc.frequency.setValueAtTime(880, now + offset); // A5
+              
+              gain.gain.setValueAtTime(0.3, now + offset);
+              gain.gain.exponentialRampToValueAtTime(0.01, now + offset + 0.3);
+              
+              osc.start(now + offset);
+              osc.stop(now + offset + 0.35);
+          });
       } catch (e) {
           console.error("Audio playback error", e);
       }
@@ -295,10 +366,8 @@ export default function App() {
 
   const playVictorySound = () => {
       try {
-          const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-          if (!AudioContext) return;
-          const ctx = new AudioContext();
-          if (ctx.state === 'suspended') ctx.resume();
+          const ctx = getAudioContext();
+          if (!ctx) return;
           
           const now = ctx.currentTime;
           const notes = [523.25, 659.25, 783.99, 1046.50]; // C E G C
@@ -326,24 +395,27 @@ export default function App() {
 
   const playClickSound = () => {
       try {
-          const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-          if (!AudioContext) return;
-          const ctx = new AudioContext();
-          if (ctx.state === 'suspended') ctx.resume();
+          const ctx = getAudioContext();
+          if (!ctx) return;
           
+          const now = ctx.currentTime;
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
           osc.connect(gain);
           gain.connect(ctx.destination);
           
-          osc.type = 'square';
-          osc.frequency.setValueAtTime(400, ctx.currentTime); // Lower pitch "thock"
+          // Lower pitched "woodblock" style sound for chess clock
+          // 400Hz to 200Hz sweep is more pleasant than 800Hz
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(450, now);
+          osc.frequency.exponentialRampToValueAtTime(200, now + 0.08);
           
-          gain.gain.setValueAtTime(0.1, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+          // Shorter, snappier envelope
+          gain.gain.setValueAtTime(0.5, now);
+          gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
           
-          osc.start();
-          osc.stop(ctx.currentTime + 0.1);
+          osc.start(now);
+          osc.stop(now + 0.1);
       } catch (e) {
           console.error("Audio playback error", e);
       }
@@ -352,7 +424,6 @@ export default function App() {
   // Splash Screen Effect
   useEffect(() => {
     if (showSplash) {
-        // Auto dismiss after time
         const timer = setTimeout(() => {
             handleDismissSplash();
         }, 3500);
@@ -362,26 +433,21 @@ export default function App() {
 
   const handleDismissSplash = () => {
       if (splashFading) return;
-      
       setSplashFading(true);
-      
-      // Use the Ref to check the latest value of the checkbox
-      // This works even if called from the initial useEffect closure
       if (dontShowSplashRef.current) {
           localStorage.setItem('sm_skip_splash', 'true');
       }
-
       setTimeout(() => {
           setShowSplash(false);
           setSplashFading(false);
-      }, 500); // Match CSS fade duration
+      }, 500); 
   };
 
   const toggleDontShowSplash = (e: React.MouseEvent) => {
     e.stopPropagation();
     const newValue = !dontShowSplashAgain;
     setDontShowSplashAgain(newValue);
-    dontShowSplashRef.current = newValue; // Update ref immediately
+    dontShowSplashRef.current = newValue; 
   };
 
   // Language & RTL Effect
@@ -421,16 +487,6 @@ export default function App() {
           playVictorySound();
       }
   }, [view]);
-
-  // Scroll to active player in scoring view
-  useEffect(() => {
-      if (view === 'SCORING' && selectedPlayerId && scoringPlayerScrollRef.current) {
-          const selectedElement = document.getElementById(`score-player-${selectedPlayerId}`);
-          if (selectedElement) {
-              selectedElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-          }
-      }
-  }, [view, selectedPlayerId]);
 
   useEffect(() => {
      if (!editingPlayerId) {
@@ -483,7 +539,7 @@ export default function App() {
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [isTimerActive]); // Removed timerLeft from dependency to avoid interval churn
+  }, [isTimerActive]); 
 
   // Chess Clock Effect
   useEffect(() => {
@@ -527,7 +583,7 @@ export default function App() {
         const maxTurnsVal = tempMaxTurns ? parseInt(tempMaxTurns) : null;
         setSettings({ 
             targetScore: tempTargetScore ? parseInt(tempTargetScore) : null,
-            maxTurns: (maxTurnsVal !== null && maxTurnsVal > 0) ? maxTurnsVal : null // Treat 0 as null (infinite)
+            maxTurns: (maxTurnsVal !== null && maxTurnsVal > 0) ? maxTurnsVal : null 
         });
         setView('LIST');
         return;
@@ -549,6 +605,58 @@ export default function App() {
       setWizardPlayerColor(PREDEFINED_COLORS[0]);
   };
 
+  const prevWizardStep = () => {
+    if (!setupWizard) return;
+
+    if (setupWizard.current > 0) {
+        const prevIndex = setupWizard.current - 1;
+        const prevPlayer = setupWizard.tempPlayers[prevIndex];
+        const updatedTempPlayers = setupWizard.tempPlayers.slice(0, prevIndex);
+
+        setSetupWizard({
+            ...setupWizard,
+            current: prevIndex,
+            tempPlayers: updatedTempPlayers
+        });
+
+        const defaultNamePrefix = t('player');
+        setWizardPlayerName(prevPlayer.name.startsWith(defaultNamePrefix) ? '' : prevPlayer.name);
+        setWizardPlayerColor(prevPlayer.color);
+    } else {
+        setSetupWizard({
+            ...setupWizard,
+            step: 'COUNT'
+        });
+        setWizardPlayerName('');
+    }
+  };
+
+  const finishWizardEarly = () => {
+    if (!setupWizard) return;
+
+    const finalName = wizardPlayerName.trim() || `${t('player')} ${setupWizard.current + 1}`;
+    
+    const newPlayer: Player = {
+        id: crypto.randomUUID(),
+        name: finalName,
+        totalScore: 0,
+        history: [],
+        color: wizardPlayerColor
+    };
+
+    const finalPlayers = [...setupWizard.tempPlayers, newPlayer];
+    
+    setPlayers(finalPlayers);
+    setGameName(tempGameName.trim());
+    const maxTurnsVal = tempMaxTurns ? parseInt(tempMaxTurns) : null;
+    setSettings({ 
+        targetScore: tempTargetScore ? parseInt(tempTargetScore) : null,
+        maxTurns: (maxTurnsVal !== null && maxTurnsVal > 0) ? maxTurnsVal : null
+    });
+    setView('LIST');
+    setSetupWizard(null);
+  };
+
   const nextWizardStep = () => {
       if (!setupWizard) return;
 
@@ -568,7 +676,7 @@ export default function App() {
           const maxTurnsVal = tempMaxTurns ? parseInt(tempMaxTurns) : null;
           setSettings({ 
             targetScore: tempTargetScore ? parseInt(tempTargetScore) : null,
-            maxTurns: (maxTurnsVal !== null && maxTurnsVal > 0) ? maxTurnsVal : null // Treat 0 as null (infinite)
+            maxTurns: (maxTurnsVal !== null && maxTurnsVal > 0) ? maxTurnsVal : null 
         });
         setView('LIST');
         setSetupWizard(null);
@@ -579,7 +687,17 @@ export default function App() {
               tempPlayers: updatedPlayers
           });
           setWizardPlayerName('');
-          setWizardPlayerColor(PREDEFINED_COLORS[(setupWizard.current + 1) % PREDEFINED_COLORS.length]);
+          
+          const nextIndex = setupWizard.current + 1;
+          if (nextIndex < PREDEFINED_COLORS.length) {
+              setWizardPlayerColor(PREDEFINED_COLORS[nextIndex]);
+          } else {
+              let newColor = generateRandomColor();
+              while (updatedPlayers.some(p => p.color === newColor)) {
+                  newColor = generateRandomColor();
+              }
+              setWizardPlayerColor(newColor);
+          }
       }
   };
 
@@ -690,7 +808,6 @@ export default function App() {
     
     if (!selectedPlayerId) return;
 
-    // Use current players list to calculate new state
     const currentPlayers = [...players];
     const playerIndex = currentPlayers.findIndex(p => p.id === selectedPlayerId);
     
@@ -715,7 +832,6 @@ export default function App() {
     
     setPlayers(updatedPlayers);
 
-    // Check for score victory
     if (settings.targetScore !== null) {
       if (newScore >= settings.targetScore) {
         setWinnerId(selectedPlayerId);
@@ -724,7 +840,6 @@ export default function App() {
       }
     }
     
-    // Check for max turns victory
     if (settings.maxTurns !== null) {
         const allFinished = updatedPlayers.every(p => p.history.length >= settings.maxTurns!);
         if (allFinished) {
@@ -736,7 +851,6 @@ export default function App() {
         }
     }
     
-    // Auto advance logic
     const nextIndex = (playerIndex + 1) % updatedPlayers.length;
     setSelectedPlayerId(updatedPlayers[nextIndex].id);
     setCurrentTurnScore(0);
@@ -765,7 +879,6 @@ export default function App() {
     setTempMaxTurns(preset.defaultMaxTurns !== null ? (preset.defaultMaxTurns?.toString() || '') : '');
     
     if (preset.defaultPlayerCount && preset.defaultPlayerCount > 0) {
-      // Only set players if there are none currently
       if (players.length === 0) {
         const names = preset.defaultPlayerNames || [];
         const newPlayers: Player[] = [];
@@ -781,7 +894,6 @@ export default function App() {
         setPlayers(newPlayers);
         triggerToast(`${t('loadedConfig')} ${preset.defaultPlayerCount} ${t('playersCount')}`);
       } else {
-        // Just update the settings, keep existing players
         triggerToast(t('loadedConfig'));
       }
     }
@@ -804,21 +916,6 @@ export default function App() {
     setPresetPlayerNames(preset.defaultPlayerNames?.join(', ') || '');
     setPresetFormCategory(preset.category || 'BOARD');
     setIsCreatingPreset(true);
-  };
-
-  const cyclePresetCategory = () => {
-      if (presetFormCategory === 'BOARD') setPresetFormCategory('CARD');
-      else if (presetFormCategory === 'CARD') setPresetFormCategory('OTHER');
-      else setPresetFormCategory('BOARD');
-  };
-
-  const getCategoryLabel = (cat: PresetCategory) => {
-      switch(cat) {
-          case 'BOARD': return t('boardGame');
-          case 'CARD': return t('cardGame');
-          case 'OTHER': return t('other');
-          default: return t('other');
-      }
   };
 
   const handleSavePresetForm = () => {
@@ -865,9 +962,7 @@ export default function App() {
       players: players,
       settings: settings
     };
-    // Limit saved games to 50 to prevent localStorage overflow on mobile
     setSavedGames([newSave, ...savedGames].slice(0, 50));
-    
     triggerToast(t('gameSaved'));
   };
 
@@ -978,7 +1073,6 @@ export default function App() {
              return;
         }
 
-        // Use current players list to calculate new state
         const currentPlayers = [...players];
         const playerIndex = currentPlayers.findIndex(p => p.id === selectedPlayerId);
         
@@ -999,7 +1093,6 @@ export default function App() {
         
         setPlayers(updatedPlayers);
 
-        // Check max turns
         if (settings.maxTurns !== null) {
             const allFinished = updatedPlayers.every(p => p.history.length >= settings.maxTurns!);
             if (allFinished) {
@@ -1012,7 +1105,6 @@ export default function App() {
             }
         }
 
-        // Advance turn
         const nextIndex = (playerIndex + 1) % updatedPlayers.length;
         setSelectedPlayerId(updatedPlayers[nextIndex].id);
         setCurrentTurnScore(0);
@@ -1022,10 +1114,9 @@ export default function App() {
   };
 
   const movePlayer = (index: number, direction: 'up' | 'down') => {
-    // Logic locking if who starts was used
     if (hasUsedWhoStarts) {
-        if (index === 0 && direction === 'down') return; // Cannot move first player down
-        if (index === 1 && direction === 'up') return; // Cannot move second player up (swapping with first)
+        if (index === 0 && direction === 'down') return; 
+        if (index === 1 && direction === 'up') return; 
     }
 
     if (direction === 'up' && index === 0) return;
@@ -1038,28 +1129,21 @@ export default function App() {
     setPlayers(newPlayers);
   };
 
-  // Extra Handlers
+  const handleReorderPlayers = (newPlayers: Player[]) => {
+      setPlayers(newPlayers);
+  };
+
   const handleRollDice = () => {
     setIsRolling(true);
     const duration = 1000;
     const interval = setInterval(() => {
-       setDiceValue(Math.floor(Math.random() * diceSides) + 1);
+       setDiceResults(Array.from({length: diceCount}, () => Math.floor(Math.random() * diceSides) + 1));
     }, 100);
     setTimeout(() => {
        clearInterval(interval);
        setIsRolling(false);
-       setDiceValue(Math.floor(Math.random() * diceSides) + 1);
+       setDiceResults(Array.from({length: diceCount}, () => Math.floor(Math.random() * diceSides) + 1));
     }, duration);
-  };
-
-  const modifyTimer = (amount: number) => {
-    setTimerLeft(prev => {
-        const newValue = Math.max(0, prev + amount);
-        if (!isTimerActive) {
-            setTimerStartValue(newValue);
-        }
-        return newValue;
-    });
   };
 
   const handleFlipCoin = () => {
@@ -1074,7 +1158,6 @@ export default function App() {
   const handlePickPlayer = () => {
      if (players.length === 0) return;
      if (pickerDone) {
-         // Proceed action
          setIsExtrasOpen(false);
          setActiveTool('MENU');
          return;
@@ -1095,7 +1178,6 @@ export default function App() {
             setIsPicking(false);
             setPickerDone(true);
             
-            // Reordering logic if game hasn't started
             const hasGameStarted = players.some(p => p.history.length > 0);
             if (!hasGameStarted && resultId) {
                 const winnerIndex = players.findIndex(p => p.id === resultId);
@@ -1139,7 +1221,7 @@ export default function App() {
       setChessTime2(t2);
       setChessActive(null);
       setChessTurnCount(1);
-      setChessTurnStartTime(t1); // Init for bronstein
+      setChessTurnStartTime(t1); 
       setChessGameState('READY');
       setIsChessResumed(false);
   };
@@ -1172,7 +1254,7 @@ export default function App() {
       triggerToast(t('chessStateSaved'));
       setChessGameState('SETUP');
       setActiveTool('MENU');
-      setIsChessResumed(false); // Saved manually, so not a resumed transient state anymore
+      setIsChessResumed(false); 
   };
 
   const resumeChessGame = () => {
@@ -1187,11 +1269,7 @@ export default function App() {
       setChessModeType(saved.mode);
       setChessConfig(saved.config);
       setChessGameState('PAUSED');
-      setIsChessResumed(true); // Mark as resumed to delete on exit
-      
-      // Optionally remove from suspended state if resuming (to act like "Move" rather than "Copy")
-      // But keeping it allows resuming again if needed. 
-      // User requested "save game", implied persistence.
+      setIsChessResumed(true); 
   };
 
   const handleChessTap = (player: 1 | 2) => {
@@ -1199,7 +1277,6 @@ export default function App() {
       
       if (chessGameState === 'READY') {
           playClickSound();
-          // First tap starts the OPPONENT's clock
           const opponent = player === 1 ? 2 : 1;
           setChessActive(opponent);
           setChessGameState('PLAYING');
@@ -1212,17 +1289,14 @@ export default function App() {
           return;
       }
 
-      // Logic only runs if the active player taps (to end their turn)
       if (chessActive === player) {
           playClickSound();
-          // 1. Apply Logic for ENDING turn
           if (chessModeType === 'FISCHER') {
               if (chessTurnCount >= chessConfig.incStart) {
                   if (player === 1) setChessTime1(t => t + chessConfig.inc);
                   else setChessTime2(t => t + chessConfig.inc);
               }
           } else if (chessModeType === 'BRONSTEIN') {
-               // Bronstein: Add back time used, up to increment amount
                const currentRemaining = player === 1 ? chessTime1 : chessTime2;
                const usedTime = chessTurnStartTime - currentRemaining;
                const bonus = Math.min(usedTime, chessConfig.inc);
@@ -1230,17 +1304,13 @@ export default function App() {
                if (player === 1) setChessTime1(t => t + bonus);
                else setChessTime2(t => t + bonus);
           } else if (chessModeType === 'GONG') {
-               // Reset current player to full time
                if (player === 1) setChessTime1(chessConfig.gong);
                else setChessTime2(chessConfig.gong);
           }
 
-          // 2. Switch Turn
           const nextPlayer = player === 1 ? 2 : 1;
           setChessActive(nextPlayer);
           setChessTurnCount(c => c + 1);
-          
-          // 3. Set Start Time for next player (Bronstein)
           setChessTurnStartTime(player === 1 ? chessTime2 : chessTime1);
       }
   };
@@ -1250,7 +1320,6 @@ export default function App() {
           setConfirmationState({ isOpen: true, type: 'EXIT_CHESS' });
       } else {
           if (activeTool === 'CHESS' && chessGameState !== 'SETUP') {
-              // Handle exit from non-playing states (e.g. FINISHED or READY)
               if (isChessResumed) {
                   setSuspendedChessState(prev => {
                       const newState = { ...prev };
@@ -1270,1564 +1339,197 @@ export default function App() {
       }
   };
 
-  const renderSplashScreen = () => {
-      if (!showSplash) return null;
-      
-      return (
-          <div 
-            onClick={handleDismissSplash}
-            className={`fixed inset-0 z-[100] bg-indigo-950 flex flex-col items-center justify-center p-6 text-white transition-opacity duration-500 cursor-pointer overflow-hidden ${splashFading ? 'opacity-0' : 'opacity-100'}`}
-          >
-              <div className="relative flex flex-col items-center justify-center flex-1 w-full max-w-sm">
-                  
-                  {/* Animation Container */}
-                  <div className="relative w-48 h-48 mb-8 flex items-center justify-center">
-                      
-                      {/* Exploding Cards Background */}
-                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                           <CreditCard size={64} className="absolute text-pink-500/80 animate-card-left" />
-                           <CreditCard size={64} className="absolute text-cyan-500/80 animate-card-right" />
-                           <CreditCard size={64} className="absolute text-yellow-500/80 animate-card-bottom" />
-                      </div>
-
-                      {/* Rotating Dice Foreground */}
-                      <div className="relative z-10 animate-dice-tumble">
-                          <Dices size={96} className="text-white drop-shadow-[0_0_15px_rgba(255,255,255,0.5)]" />
-                      </div>
-                  </div>
-
-                  <h1 className="text-5xl font-black mb-2 tracking-tighter animate-in fade-in slide-in-from-bottom-8 duration-700 delay-300">
-                      LudiScore
-                  </h1>
-                  <span className="text-indigo-300 font-bold tracking-widest text-sm animate-in fade-in duration-1000 delay-700">v1.0</span>
-
-              </div>
-
-              <div className="mt-auto pb-safe w-full max-w-xs animate-in fade-in duration-1000 delay-1000">
-                  <div className="text-center text-indigo-300/50 text-xs uppercase tracking-widest mb-6 animate-pulse">
-                      Tap to start
-                  </div>
-                  
-                  <div 
-                    onClick={toggleDontShowSplash}
-                    className="flex items-center justify-center gap-3 p-3 rounded-xl bg-black/20 hover:bg-black/30 transition-colors cursor-pointer select-none"
-                  >
-                      <div className={`w-5 h-5 rounded border border-indigo-400 flex items-center justify-center transition-colors ${dontShowSplashAgain ? 'bg-indigo-500 border-indigo-500' : 'bg-transparent'}`}>
-                          {dontShowSplashAgain && <Check size={14} className="text-white" />}
-                      </div>
-                      <span className="text-sm font-medium text-indigo-200">No volver a mostrar</span>
-                  </div>
-              </div>
-          </div>
-      );
-  };
-
-  const renderConfirmationModal = () => (
-      confirmationState.isOpen && (
-         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setConfirmationState({ isOpen: false, type: null })} />
-            <div className="relative bg-white dark:bg-gray-900 border border-red-500/30 p-6 rounded-2xl w-full max-w-sm shadow-2xl animate-in zoom-in-95 duration-200">
-                <div className="w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center text-red-500 mb-4 mx-auto">
-                    <AlertTriangle size={24} />
-                </div>
-                <h3 className="text-xl font-bold text-center mb-2 text-gray-900 dark:text-white">
-                    {confirmationState.type === 'EXIT_CHESS' ? t('confirmExitChess') : 
-                     confirmationState.type === 'OVERWRITE_CHESS' ? t('confirmOverwriteChess') : 
-                     confirmationState.type === 'OVERWRITE_CHESS_START' ? t('confirmOverwriteChessStart') : t('confirmTitle')}
-                </h3>
-                <p className="text-gray-500 dark:text-gray-400 text-center mb-6 text-sm">
-                    {confirmationState.type === 'RESET_SCORES' && t('confirmResetScores')}
-                    {confirmationState.type === 'RESET_ALL' && t('confirmResetAll')}
-                    {confirmationState.type === 'LOAD_GAME' && t('confirmLoadGame')}
-                    {confirmationState.type === 'DELETE_PRESET' && t('confirmDeletePreset')}
-                    {confirmationState.type === 'DELETE_SAVE' && t('confirmDeleteSave')}
-                    {confirmationState.type === 'DELETE_PLAYER' && t('confirmDeletePlayer')}
-                    {confirmationState.type === 'PASS_TURN' && t('confirmPassTurn')}
-                    {confirmationState.type === 'EXIT_CHESS' && t('confirmExitChessDesc')}
-                    {confirmationState.type === 'OVERWRITE_CHESS' && t('confirmOverwriteChessDesc')}
-                    {confirmationState.type === 'OVERWRITE_CHESS_START' && t('confirmOverwriteChessStartDesc')}
-                </p>
-                <div className="flex gap-3">
-                    <Button variant="ghost" fullWidth onClick={() => setConfirmationState({ isOpen: false, type: null })}>
-                        {t('cancel')}
-                    </Button>
-                    <Button variant="danger" fullWidth onClick={executeConfirmation}>
-                        {confirmationState.type === 'EXIT_CHESS' ? t('exitWithoutSaving') : 
-                         confirmationState.type === 'OVERWRITE_CHESS' ? t('save') : 
-                         confirmationState.type === 'OVERWRITE_CHESS_START' ? t('startAnyway') : t('accept')}
-                    </Button>
-                </div>
-            </div>
-         </div>
-      )
-  );
-
-  const renderPlayerHistoryModal = () => {
-    const player = players.find(p => p.id === selectedPlayerId);
-    if (!isPlayerHistoryOpen || !player) return null;
-
-    return (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setIsPlayerHistoryOpen(false)} />
-            <div className="relative bg-white dark:bg-gray-900 text-gray-900 dark:text-white p-6 rounded-2xl w-full max-w-sm shadow-2xl h-[70vh] flex flex-col animate-in zoom-in-95 duration-200">
-                
-                {/* Header with Close */}
-                <div className="flex justify-between items-center mb-4">
-                    <h3 className="font-bold text-lg">{t('playerHistory')}</h3>
-                    <button onClick={() => setIsPlayerHistoryOpen(false)} className="text-gray-400 hover:text-gray-900 dark:hover:text-white p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
-                        <X size={20} />
-                    </button>
-                </div>
-
-                {/* Player Navigation Bar */}
-                <div className="flex items-center justify-between mb-6 bg-gray-50 dark:bg-gray-800/50 p-2 rounded-xl border border-gray-100 dark:border-gray-700">
-                    <button onClick={() => navigatePlayer('prev')} className="p-2 text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-white dark:hover:bg-gray-700 rounded-lg transition-all active:scale-95">
-                        <ChevronLeft size={24} className="rtl:rotate-180" />
-                    </button>
-                    
-                    <div className="flex items-center gap-3">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold shadow-sm ${player.color} text-sm`}>
-                            {getPlayerInitials(player.name)}
-                        </div>
-                        <div className="font-bold text-base truncate max-w-[140px]">{player.name}</div>
-                    </div>
-
-                    <button onClick={() => navigatePlayer('next')} className="p-2 text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-white dark:hover:bg-gray-700 rounded-lg transition-all active:scale-95">
-                        <ChevronRight size={24} className="rtl:rotate-180" />
-                    </button>
-                </div>
-                
-                {/* History List (Clean) */}
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-                    {player.history.length === 0 ? (
-                        <div className="flex flex-col items-center justify-center h-40 text-gray-400 space-y-2">
-                            <FileSearch size={32} className="opacity-20" />
-                            <p className="italic text-sm">{t('noMoves')}</p>
-                        </div>
-                    ) : (
-                        player.history.map((turn, i) => (
-                            <div key={turn.id} className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-100 dark:border-gray-700">
-                                <span className="text-xs text-gray-400 font-mono font-medium bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded">#{player.history.length - i}</span>
-                                <div className={`font-black text-xl ${turn.amount > 0 ? 'text-green-500' : turn.amount < 0 ? 'text-red-500' : 'text-gray-400'}`}>
-                                    {turn.amount > 0 ? '+' : ''}{turn.amount}
-                                </div>
-                            </div>
-                        ))
-                    )}
-                </div>
-            </div>
-        </div>
-    );
-  };
-
-  const renderExtrasModal = () => {
-      if (!isExtrasOpen) return null;
-      const isChessActive = activeTool === 'CHESS' && chessGameState !== 'SETUP';
-      const isPickerDisabled = view === 'SCORING' || hasUsedWhoStarts;
-      
-      return (
-        <div className={`fixed inset-0 z-[80] flex items-center justify-center p-4 ${activeTool === 'CHESS' ? 'overflow-hidden' : ''}`}>
-             <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={handleChessExitRequest} />
-             <div className={`relative bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 p-6 rounded-3xl w-full max-w-sm shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col ${activeTool === 'CHESS' ? 'h-[90vh] min-h-[500px]' : 'min-h-[300px]'}`}>
-                 
-                 {!isChessActive && (
-                     <div className="flex justify-between items-center mb-6 shrink-0">
-                         <h3 className="text-xl font-black text-gray-900 dark:text-white flex items-center gap-2">
-                            {activeTool !== 'MENU' && (
-                                <button onClick={handleChessExitRequest} className="text-gray-400 hover:text-gray-900 dark:hover:text-white rtl:rotate-180">
-                                    <ChevronLeft size={24} />
-                                </button>
-                            )}
-                            {activeTool === 'MENU' ? t('extras') : 
-                             activeTool === 'DICE' ? t('rollDice') :
-                             activeTool === 'TIMER' ? t('timer') : 
-                             activeTool === 'COIN' ? t('coinFlip') :
-                             activeTool === 'CHESS' ? t('chessClock') : t('whoStarts')}
-                         </h3>
-                         <button onClick={handleChessExitRequest} className="text-gray-400 hover:text-gray-900 dark:hover:text-white">
-                             <X size={24} />
-                         </button>
-                     </div>
-                 )}
-
-                 <div className="flex-1 flex flex-col justify-center h-full min-h-0">
-                    {activeTool === 'MENU' && (
-                        <div className="grid grid-cols-2 gap-4">
-                            <button onClick={() => setActiveTool('DICE')} className="flex flex-col items-center justify-center gap-3 bg-indigo-50 dark:bg-gray-800 p-6 rounded-2xl hover:bg-indigo-100 dark:hover:bg-gray-700 transition-colors">
-                                <Dices size={32} className="text-indigo-600 dark:text-indigo-400" />
-                                <span className="font-bold text-gray-700 dark:text-gray-200">{t('rollDice')}</span>
-                            </button>
-                            <button onClick={() => setActiveTool('TIMER')} className="flex flex-col items-center justify-center gap-3 bg-orange-50 dark:bg-gray-800 p-6 rounded-2xl hover:bg-orange-100 dark:hover:bg-gray-700 transition-colors">
-                                <Clock size={32} className="text-orange-600 dark:text-orange-400" />
-                                <span className="font-bold text-gray-700 dark:text-gray-200">{t('timer')}</span>
-                            </button>
-                            <button onClick={() => { setChessGameState('SETUP'); setActiveTool('CHESS'); }} className="flex flex-col items-center justify-center gap-3 bg-blue-50 dark:bg-gray-800 p-6 rounded-2xl hover:bg-blue-100 dark:hover:bg-gray-700 transition-colors">
-                                <Timer size={32} className="text-blue-600 dark:text-blue-400" />
-                                <span className="font-bold text-gray-700 dark:text-gray-200">{t('chessClock')}</span>
-                            </button>
-                            <button onClick={() => setActiveTool('COIN')} className="flex flex-col items-center justify-center gap-3 bg-yellow-50 dark:bg-gray-800 p-6 rounded-2xl hover:bg-yellow-100 dark:hover:bg-gray-700 transition-colors">
-                                <Coins size={32} className="text-yellow-600 dark:text-yellow-400" />
-                                <span className="font-bold text-gray-700 dark:text-gray-200">{t('coinFlip')}</span>
-                            </button>
-                        </div>
-                    )}
-
-                    {activeTool === 'DICE' && (
-                        <div className="flex flex-col items-center gap-6">
-                            <div className="grid grid-cols-4 gap-2 w-full mb-2">
-                                {[4,6,8,10,12,20,100].map(sides => (
-                                    <button
-                                        key={sides}
-                                        onClick={() => setDiceSides(sides)}
-                                        className={`py-2 px-1 rounded-lg font-bold text-sm transition-colors border ${diceSides === sides ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'}`}
-                                    >
-                                        {sides === 100 ? 'd100' : `d${sides}`}
-                                    </button>
-                                ))}
-                            </div>
-
-                            <div className={`w-32 h-32 bg-indigo-600 rounded-3xl flex items-center justify-center text-6xl font-black text-white shadow-xl ${isRolling ? 'animate-spin' : ''}`}>
-                                {diceValue}
-                            </div>
-                            <Button fullWidth onClick={handleRollDice} disabled={isRolling}>
-                                {isRolling ? t('rolling') : `${t('rollDice')} (D${diceSides === 100 ? '100' : diceSides})`}
-                            </Button>
-                        </div>
-                    )}
-
-                    {activeTool === 'COIN' && (
-                        <div className="flex flex-col items-center gap-10">
-                            <div className="relative w-40 h-40">
-                                 <div className={`w-full h-full rounded-full flex items-center justify-center text-4xl font-bold text-yellow-900 border-8 border-yellow-600 shadow-xl transition-all duration-700 ${isFlipping ? 'animate-[spin_0.5s_linear_infinite]' : ''} ${!isFlipping && coinResult ? 'bg-yellow-400' : 'bg-yellow-100'}`}>
-                                     {!isFlipping && coinResult ? (coinResult === 'HEADS' ? t('heads') : t('tails')) : '?'}
-                                 </div>
-                            </div>
-                            <Button fullWidth onClick={handleFlipCoin} disabled={isFlipping} className="bg-yellow-500 hover:bg-yellow-600 text-yellow-900 shadow-yellow-500/20">
-                                {isFlipping ? t('flipping') : t('coinFlip')}
-                            </Button>
-                        </div>
-                    )}
-
-                    {activeTool === 'TIMER' && (
-                        <div className="flex flex-col items-center gap-6">
-                            <div className={`text-6xl font-black font-mono tabular-nums ${timerLeft === 0 ? 'text-red-500 animate-pulse' : 'text-gray-900 dark:text-white'}`}>
-                                {formatTime(timerLeft)}
-                            </div>
-                            
-                            <div className="flex flex-wrap gap-2 mb-2 justify-center">
-                                <button onClick={() => modifyTimer(-60)} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm font-bold text-gray-600 dark:text-gray-300">-1m</button>
-                                <button onClick={() => modifyTimer(-10)} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm font-bold text-gray-600 dark:text-gray-300">-10s</button>
-                                <button onClick={() => modifyTimer(10)} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm font-bold text-gray-600 dark:text-gray-300">+10s</button>
-                                <button onClick={() => modifyTimer(60)} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm font-bold text-gray-600 dark:text-gray-300">+1m</button>
-                                <button onClick={() => modifyTimer(300)} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm font-bold text-gray-600 dark:text-gray-300">+5m</button>
-                                <button onClick={() => modifyTimer(600)} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm font-bold text-gray-600 dark:text-gray-300">+10m</button>
-                            </div>
-
-                            <Button 
-                                fullWidth 
-                                variant={isTimerActive || timerLeft === 0 ? "danger" : "primary"}
-                                onClick={() => {
-                                    if (isTimerActive || timerLeft === 0) {
-                                        setIsTimerActive(false);
-                                        setTimerLeft(timerStartValue);
-                                    } else {
-                                        setIsTimerActive(true);
-                                    }
-                                }}
-                            >
-                                {isTimerActive || timerLeft === 0 ? t('reset') : t('start')}
-                            </Button>
-                        </div>
-                    )}
-
-                    {activeTool === 'CHESS' && (
-                        chessGameState === 'SETUP' ? (
-                            <div className="flex flex-col gap-4 animate-in fade-in h-full">
-                                <div className="grid grid-cols-2 gap-2 bg-gray-100 dark:bg-gray-800 p-1 rounded-xl shrink-0">
-                                    {(['STANDARD', 'GONG', 'FISCHER', 'BRONSTEIN'] as ChessMode[]).map(mode => (
-                                        <button
-                                            key={mode}
-                                            onClick={() => setChessModeType(mode)}
-                                            className={`py-2 px-1 text-xs font-bold rounded-lg transition-all ${chessModeType === mode ? 'bg-white dark:bg-gray-700 shadow text-indigo-600 dark:text-white' : 'text-gray-500 dark:text-gray-400'}`}
-                                        >
-                                            {t(`mode${mode.charAt(0) + mode.slice(1).toLowerCase()}` as any)}
-                                        </button>
-                                    ))}
-                                </div>
-
-                                <div className="flex-1 overflow-y-auto space-y-4">
-                                    {suspendedChessState[chessModeType] && (
-                                        <button 
-                                            onClick={resumeChessGame}
-                                            className="w-full bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 p-4 rounded-xl flex items-center justify-between group hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors"
-                                        >
-                                            <div className="text-left">
-                                                <div className="font-bold text-indigo-700 dark:text-indigo-400 text-sm">{t('resumeChessGame')}</div>
-                                                <div className="text-xs text-indigo-500 dark:text-indigo-500/70">
-                                                    {t(`mode${suspendedChessState[chessModeType].mode.charAt(0) + suspendedChessState[chessModeType].mode.slice(1).toLowerCase()}` as any)} • Turn {suspendedChessState[chessModeType].turnCount}
-                                                </div>
-                                            </div>
-                                            <Play size={20} className="text-indigo-600 dark:text-indigo-400" />
-                                        </button>
-                                    )}
-
-                                    {chessModeType !== 'GONG' && (
-                                        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-                                            <div className="flex justify-between items-center mb-3">
-                                                <label className="text-sm font-bold text-gray-500 uppercase">{t('totalTime')}</label>
-                                                <span className="font-mono font-bold text-lg">{Math.floor(chessConfig.time / 60)}m</span>
-                                            </div>
-                                            <div className="flex gap-2 mb-3">
-                                                <button onClick={() => setChessConfig(p => ({...p, time: Math.max(60, p.time - 60)}))} className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-2 font-bold">-1m</button>
-                                                <button onClick={() => setChessConfig(p => ({...p, time: p.time + 60}))} className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-2 font-bold">+1m</button>
-                                                <button onClick={() => setChessConfig(p => ({...p, time: p.time + 300}))} className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-2 font-bold">+5m</button>
-                                            </div>
-
-                                            {chessModeType === 'STANDARD' && (
-                                                <div className="mt-3 border-t border-gray-100 dark:border-gray-700 pt-3">
-                                                    <label className="text-xs font-bold text-gray-400 uppercase mb-1 block">{t('customTime')}</label>
-                                                    <div className="flex items-center gap-2">
-                                                        <input 
-                                                            type="number" 
-                                                            value={Math.floor(chessConfig.time / 60)} 
-                                                            onChange={(e) => {
-                                                                const val = parseInt(e.target.value);
-                                                                if (!isNaN(val) && val > 0) setChessConfig(p => ({...p, time: val * 60}));
-                                                            }}
-                                                            className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg p-2 text-center font-bold"
-                                                        />
-                                                        <span className="text-xs font-bold text-gray-400 shrink-0">min</span>
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-
-                                    {chessModeType === 'GONG' && (
-                                        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-                                            <label className="text-sm font-bold text-gray-500 uppercase mb-3 block">{t('timePerTurn')}</label>
-                                            <div className="grid grid-cols-3 gap-2 mb-2">
-                                                {[15, 30, 45, 60, 90, 120].map(sec => (
-                                                    <button
-                                                        key={sec}
-                                                        onClick={() => setChessConfig(p => ({...p, gong: sec}))}
-                                                        className={`py-2 rounded-lg font-bold border ${chessConfig.gong === sec ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'}`}
-                                                    >
-                                                        {sec}{t('secondsShort')}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                            
-                                            <div className="mt-3">
-                                                <label className="text-xs font-bold text-gray-400 uppercase mb-1 block">{t('customTime')}</label>
-                                                <div className="flex items-center gap-2">
-                                                    <input 
-                                                        type="number" 
-                                                        value={chessConfig.gong} 
-                                                        onChange={(e) => {
-                                                            const val = parseInt(e.target.value);
-                                                            if (!isNaN(val) && val > 0) setChessConfig(p => ({...p, gong: val}));
-                                                        }}
-                                                        className="w-full bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg p-2 text-center font-bold"
-                                                    />
-                                                    <span className="text-xs font-bold text-gray-400 shrink-0">sec</span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {(chessModeType === 'FISCHER') && (
-                                        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-                                            <div className="flex justify-between items-center mb-3">
-                                                <label className="text-sm font-bold text-gray-500 uppercase">{t('increment')}</label>
-                                                <span className="font-mono font-bold text-lg">+{chessConfig.inc}s</span>
-                                            </div>
-                                            <div className="flex gap-2">
-                                                <button onClick={() => setChessConfig(p => ({...p, inc: Math.max(0, p.inc - 1)}))} className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-2 font-bold">-1s</button>
-                                                <button onClick={() => setChessConfig(p => ({...p, inc: p.inc + 1}))} className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-2 font-bold">+1s</button>
-                                            </div>
-                                            
-                                            <div className="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
-                                                <div className="flex justify-between items-center mb-3">
-                                                    <label className="text-sm font-bold text-gray-500 uppercase">{t('incStartTurn')}</label>
-                                                    <span className="font-mono font-bold text-lg">#{chessConfig.incStart}</span>
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <button onClick={() => setChessConfig(p => ({...p, incStart: Math.max(1, p.incStart - 1)}))} className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-2 font-bold">-1</button>
-                                                    <button onClick={() => setChessConfig(p => ({...p, incStart: p.incStart + 1}))} className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-2 font-bold">+1</button>
-                                                </div>
-                                            </div>
-                                            <p className="text-xs text-gray-400 mt-3 italic leading-relaxed">{t('fischerDesc')}</p>
-                                        </div>
-                                    )}
-
-                                    {chessModeType === 'BRONSTEIN' && (
-                                        <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-                                             <div className="flex justify-between items-center mb-3">
-                                                <label className="text-sm font-bold text-gray-500 uppercase">{t('increment')}</label>
-                                                <span className="font-mono font-bold text-lg">+{chessConfig.inc}s</span>
-                                            </div>
-                                            <p className="text-xs text-gray-400 italic leading-relaxed">{t('bronsteinDesc')}</p>
-                                        </div>
-                                    )}
-                                </div>
-                                
-                                <div className="mt-auto">
-                                    <Button fullWidth onClick={startChessGameRequest}>
-                                        {t('start')}
-                                    </Button>
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="flex flex-col h-full flex-1 min-h-0 relative">
-                                
-                                {/* Ready State Overlay */}
-                                {chessGameState === 'READY' && (
-                                    <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
-                                        <div className="bg-black/70 text-white px-6 py-3 rounded-full font-bold animate-pulse text-center">
-                                            {t('tapToStart')}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Player 2 Area (Top - Inverted) */}
-                                <button
-                                    onMouseDown={() => handleChessTap(2)}
-                                    onTouchStart={(e) => { e.preventDefault(); handleChessTap(2); }}
-                                    disabled={chessGameState === 'FINISHED'}
-                                    className={`flex-1 rounded-t-3xl flex items-center justify-center text-7xl font-black transition-all relative active:scale-[0.99] touch-manipulation select-none ${chessActive === 2 ? 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 ring-4 ring-inset ring-red-500' : 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500'}`}
-                                >
-                                    <div className="rotate-180 flex flex-col items-center">
-                                         <span className="font-mono tabular-nums">{formatTime(chessTime2)}</span>
-                                         {chessActive === 2 && <span className="text-xs font-bold mt-2 animate-pulse">{t('turnOf')} P2</span>}
-                                    </div>
-                                </button>
-
-                                {/* Controls Bar */}
-                                <div className="h-14 bg-white dark:bg-gray-900 border-y border-gray-200 dark:border-gray-700 flex items-center justify-between px-4 z-10 shrink-0">
-                                    <button 
-                                        onClick={handleChessExitRequest}
-                                        className="p-2 text-gray-500 hover:text-gray-900 dark:hover:text-white"
-                                    >
-                                        <ChevronLeft size={20} />
-                                    </button>
-                                    
-                                    <div className="flex items-center gap-2 flex-1 justify-center">
-                                         {chessGameState !== 'READY' && chessGameState !== 'FINISHED' && (
-                                            <>
-                                                <button 
-                                                    onClick={requestSaveChessGame}
-                                                    className="w-10 h-10 rounded-full flex items-center justify-center text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700"
-                                                    title={t('save')}
-                                                >
-                                                    <Save size={16} />
-                                                </button>
-                                                <div className="text-xs font-bold bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 px-3 py-1 rounded-lg uppercase tracking-wider mx-2">
-                                                    {t(`mode${chessModeType.charAt(0) + chessModeType.slice(1).toLowerCase()}` as any)}
-                                                </div>
-                                                <button 
-                                                    onClick={() => setChessGameState(prev => prev === 'PAUSED' ? 'PLAYING' : 'PAUSED')}
-                                                    className={`w-10 h-10 rounded-full flex items-center justify-center text-white ${chessGameState === 'PAUSED' ? 'bg-green-500 hover:bg-green-600' : 'bg-yellow-500 hover:bg-yellow-600'}`}
-                                                >
-                                                    {chessGameState === 'PAUSED' ? <Play size={16} className="ml-0.5" /> : <Pause size={16} />}
-                                                </button>
-                                            </>
-                                         )}
-                                    </div>
-
-                                    <div className="text-xs font-mono font-bold text-gray-400">
-                                        #{chessTurnCount}
-                                    </div>
-                                </div>
-
-                                {/* Player 1 Area (Bottom) */}
-                                <button
-                                    onMouseDown={() => handleChessTap(1)}
-                                    onTouchStart={(e) => { e.preventDefault(); handleChessTap(1); }}
-                                    disabled={chessGameState === 'FINISHED'}
-                                    className={`flex-1 rounded-b-3xl flex items-center justify-center text-7xl font-black transition-all relative active:scale-[0.99] touch-manipulation select-none ${chessActive === 1 ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 ring-4 ring-inset ring-indigo-500' : 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500'}`}
-                                >
-                                    <div className="flex flex-col items-center">
-                                        <span className="font-mono tabular-nums">{formatTime(chessTime1)}</span>
-                                        {chessActive === 1 && <span className="text-xs font-bold mt-2 animate-pulse">{t('turnOf')} P1</span>}
-                                    </div>
-                                </button>
-                            </div>
-                        )
-                    )}
-
-                    {activeTool === 'PICKER' && (
-                         <div className="flex flex-col items-center gap-6 w-full">
-                            {players.length > 0 ? (
-                                <>
-                                    <div className="w-full flex flex-col gap-2 max-h-[200px] overflow-y-auto">
-                                        {players.map(p => (
-                                            <div key={p.id} className={`p-3 rounded-xl flex items-center gap-3 transition-all ${pickerId === p.id ? `bg-green-100 dark:bg-green-900/30 ring-2 ring-green-500 scale-105` : 'bg-gray-50 dark:bg-gray-800 opacity-50'}`}>
-                                                <div className={`w-8 h-8 rounded-full ${p.color} flex items-center justify-center text-white text-xs font-bold shrink-0`}>{getPlayerInitials(p.name)}</div>
-                                                <span className={`font-bold truncate ${pickerId === p.id ? 'text-green-700 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>{p.name}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <Button fullWidth onClick={handlePickPlayer} disabled={isPicking}>
-                                        {isPicking ? t('rolling') : (pickerDone ? <span className="flex items-center gap-2"><Check size={18} /> {t('proceed')}</span> : t('pick'))}
-                                    </Button>
-                                </>
-                            ) : (
-                                <p className="text-gray-500 italic">{t('addPlayer')}</p>
-                            )}
-                         </div>
-                    )}
-                 </div>
-             </div>
-        </div>
-      );
-  };
-
-  const renderPlayerDialog = () => (
-      <dialog id="add-player-dialog" className="bg-transparent backdrop:bg-black/80 p-0 w-full max-w-sm m-auto z-50">
-        <div className="bg-white dark:bg-gray-900 text-gray-900 dark:text-white p-6 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-2xl m-4">
-            <h3 className="text-xl font-bold mb-4">{editingPlayerId ? t('editPlayer') : t('newPlayer')}</h3>
-            
-            <input 
-                type="text"
-                value={newPlayerName}
-                onChange={(e) => setNewPlayerName(e.target.value)}
-                placeholder={`${t('player')} ${players.length + 1}`}
-                className="w-full bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-3 text-gray-900 dark:text-white mb-4 focus:border-indigo-500 focus:outline-none"
-                autoFocus
-            />
-
-            <div className="grid grid-cols-4 gap-2 mb-2">
-                {PREDEFINED_COLORS.map(color => (
-                    <button
-                        key={color}
-                        onClick={() => setNewPlayerColor(color)}
-                        className={`h-10 rounded-lg ${color} ${newPlayerColor === color ? 'ring-2 ring-indigo-500 dark:ring-white ring-offset-2 ring-offset-white dark:ring-offset-gray-900' : 'opacity-50 hover:opacity-100'} transition-all relative`}
-                    >
-                        {isColorTaken(color) && newPlayerColor !== color && (
-                            <div className="absolute inset-0 flex items-center justify-center bg-black/20 rounded-lg">
-                                <div className="w-2 h-2 bg-white rounded-full opacity-50"></div>
-                            </div>
-                        )}
-                    </button>
-                ))}
-            </div>
-            
-            {isColorTaken(newPlayerColor) && (
-                <div className="flex items-center gap-2 text-orange-500 text-xs mb-6 font-bold animate-in fade-in slide-in-from-top-1">
-                    <AlertTriangle size={12} /> {t('colorWarning')}
-                </div>
-            )}
-            {!isColorTaken(newPlayerColor) && <div className="mb-6"></div>}
-            
-            <div className="flex gap-3">
-                {editingPlayerId && (
-                     <button 
-                        onClick={() => {
-                            deletePlayer(editingPlayerId);
-                            (document.getElementById('add-player-dialog') as HTMLDialogElement)?.close();
-                        }}
-                        className="flex-1 bg-red-500/10 text-red-500 py-3 rounded-xl font-bold hover:bg-red-500 hover:text-white transition-colors"
-                     >
-                        {t('delete')}
-                     </button>
-                )}
-                <Button 
-                    fullWidth 
-                    onClick={() => {
-                        handleSavePlayer();
-                        (document.getElementById('add-player-dialog') as HTMLDialogElement)?.close();
-                    }}
-                >
-                    {t('save')}
-                </Button>
-            </div>
-             <button 
-                className="absolute top-4 right-4 text-gray-500 hover:text-gray-900 dark:hover:text-white rtl:right-auto rtl:left-4"
-                onClick={() => (document.getElementById('add-player-dialog') as HTMLDialogElement)?.close()}
-            >
-                <X size={24} />
-            </button>
-        </div>
-      </dialog>
-  );
-
-  const renderSetupWizard = () => {
-      if (!setupWizard) return null;
-
-      if (setupWizard.step === 'COUNT') {
-          return (
-             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-50 dark:bg-gray-900">
-                <div className="w-full max-w-md animate-in slide-in-from-bottom-8 duration-300">
-                     <h2 className="text-3xl font-black text-center mb-2 text-gray-900 dark:text-white">{t('howManyPlayers')}</h2>
-                     <p className="text-gray-500 dark:text-gray-400 text-center mb-8">{t('selectParticipants')}</p>
-                     
-                     {!showCustomCountInput ? (
-                         <div className="grid grid-cols-3 gap-4 mb-6">
-                             {[1, 2, 3, 4, 5, 6, 7, 8].map(num => (
-                                 <button
-                                     key={num}
-                                     onClick={() => initWizardPlayers(num)}
-                                     className="aspect-square bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 text-3xl font-bold text-gray-900 dark:text-white hover:bg-indigo-600 hover:border-indigo-500 hover:text-white transition-all active:scale-95 shadow-sm hover:shadow-lg"
-                                 >
-                                     {num}
-                                 </button>
-                             ))}
-                             <button
-                                 onClick={() => setShowCustomCountInput(true)}
-                                 className="aspect-square bg-white/50 dark:bg-gray-800/50 rounded-2xl border-2 border-dashed border-gray-300 dark:border-gray-700 text-3xl font-bold text-gray-400 hover:bg-white dark:hover:bg-gray-800 hover:text-gray-900 dark:text-white hover:border-gray-400 dark:hover:border-gray-500 transition-all flex items-center justify-center"
-                             >
-                                 <Plus size={32} />
-                             </button>
-                         </div>
-                     ) : (
-                         <div className="mb-6">
-                             <input 
-                                type="number"
-                                placeholder="#"
-                                value={customPlayerCount}
-                                onChange={(e) => setCustomPlayerCount(e.target.value)}
-                                className="w-full bg-white dark:bg-gray-800 border-2 border-indigo-500 rounded-2xl p-6 text-center text-4xl font-bold mb-4 focus:outline-none text-gray-900 dark:text-white"
-                                autoFocus
-                             />
-                             <Button fullWidth onClick={() => {
-                                 const count = parseInt(customPlayerCount);
-                                 if (count > 0 && count < 100) initWizardPlayers(count);
-                             }} disabled={!customPlayerCount}>
-                                {t('accept')}
-                             </Button>
-                             <button 
-                                onClick={() => setShowCustomCountInput(false)}
-                                className="w-full text-center text-gray-500 mt-4 py-2"
-                             >
-                                 {t('cancel')}
-                             </button>
-                         </div>
-                     )}
-                     
-                     <div className="text-center">
-                         <button onClick={() => setSetupWizard(null)} className="text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors">
-                             {t('cancelGame')}
-                         </button>
-                     </div>
-                </div>
-             </div>
-          );
-      }
-
-      return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-50 dark:bg-gray-900">
-             <div className="w-full max-w-sm animate-in fade-in duration-300">
-                <div className="flex justify-between items-center mb-8">
-                     <h2 className="text-xl font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest">{t('configuration')}</h2>
-                     <div className="text-indigo-600 dark:text-indigo-500 font-bold bg-indigo-100 dark:bg-indigo-500/10 px-3 py-1 rounded-full">
-                         {setupWizard.current + 1} / {setupWizard.total}
-                     </div>
-                </div>
-
-                <div className="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-xl mb-8">
-                    <h3 className="text-2xl font-bold text-center mb-6 text-gray-900 dark:text-white">{t('player')} {setupWizard.current + 1}</h3>
-                    
-                    <div className="mb-6">
-                        <label className="block text-gray-500 text-xs font-bold uppercase tracking-wider mb-2">{t('nameOptional')}</label>
-                        <input 
-                            type="text"
-                            value={wizardPlayerName}
-                            onChange={(e) => setWizardPlayerName(e.target.value)}
-                            placeholder={`${t('player')} ${setupWizard.current + 1}`}
-                            className="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded-xl p-4 text-gray-900 dark:text-white text-lg focus:border-indigo-500 focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600"
-                            autoFocus
-                        />
-                    </div>
-
-                    <div className="mb-2">
-                        <label className="block text-gray-500 text-xs font-bold uppercase tracking-wider mb-3">{t('color')}</label>
-                        <div className="grid grid-cols-4 gap-3">
-                            {PREDEFINED_COLORS.map(color => (
-                                <button
-                                    key={color}
-                                    onClick={() => setWizardPlayerColor(color)}
-                                    className={`h-12 rounded-xl ${color} ${wizardPlayerColor === color ? 'ring-4 ring-gray-200 dark:ring-gray-700 scale-110 shadow-xl' : 'opacity-40 hover:opacity-100'} transition-all`}
-                                >
-                                    {wizardPlayerColor === color && <Check size={20} className="mx-auto text-white" />}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-
-                <Button fullWidth onClick={nextWizardStep} className="py-4 text-lg shadow-xl shadow-indigo-500/20">
-                    {setupWizard.current + 1 === setupWizard.total ? t('startGame') : t('nextPlayer')}
-                </Button>
-             </div>
-          </div>
-      );
-  };
-
-  const renderStartScreen = () => (
-    <div className="h-full flex flex-col items-center justify-center p-6 bg-gray-50 dark:bg-gray-900 overflow-y-auto relative scrollbar-hide">
-        <div className="absolute top-6 left-6 z-30 rtl:left-auto rtl:right-6">
-             <button 
-                onClick={() => setIsAboutOpen(true)}
-                className="w-12 h-12 bg-white dark:bg-gray-800 rounded-full flex items-center justify-center text-gray-900 dark:text-white shadow-lg border border-gray-200 dark:border-gray-700 transition-transform active:scale-95 hover:scale-105"
-            >
-                <Info size={20} />
-            </button>
-        </div>
-
-        <div className="absolute top-6 right-6 z-30 rtl:right-auto rtl:left-6 flex gap-2">
-             <button 
-                onClick={() => {
-                    setIsExtrasOpen(true);
-                    setActiveTool('MENU');
-                }}
-                className="w-12 h-12 bg-white dark:bg-gray-800 rounded-full flex items-center justify-center text-indigo-600 dark:text-indigo-400 shadow-lg border border-gray-200 dark:border-gray-700 transition-transform active:scale-95 hover:scale-105"
-            >
-                <Zap size={20} />
-            </button>
-            
-            {/* Language Selector */}
-            <div className="relative">
-                <button 
-                    onClick={() => {
-                        setIsLangMenuOpen(!isLangMenuOpen);
-                    }}
-                    className="w-12 h-12 bg-white dark:bg-gray-800 rounded-full flex items-center justify-center text-gray-900 dark:text-white shadow-lg border border-gray-200 dark:border-gray-700 transition-transform active:scale-95 hover:scale-105 overflow-hidden"
-                >
-                    <span role="img" aria-label="language" className="text-2xl flex items-center justify-center w-full h-full">
-                        {LANGUAGES.find(l => l.code === language)?.flag || '🌐'}
-                    </span>
-                </button>
-                {isLangMenuOpen && (
-                    <div className="absolute top-14 right-0 rtl:right-auto rtl:left-0 bg-white dark:bg-gray-800 rounded-2xl p-2 border border-gray-200 dark:border-gray-700 shadow-xl w-64 max-h-80 overflow-y-auto z-40 grid grid-cols-2 gap-1 animate-in slide-in-from-top-2 fade-in duration-200">
-                        {LANGUAGES.map(lang => (
-                             <button
-                                key={lang.code}
-                                onClick={() => {
-                                    setLanguage(lang.code);
-                                    setIsLangMenuOpen(false);
-                                }}
-                                className={`p-2 rounded-lg text-sm font-medium flex items-center gap-2 ${language === lang.code ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
-                             >
-                                <span className="text-xl mr-1 inline-block" role="img">{lang.flag}</span> {lang.name}
-                             </button>
-                        ))}
-                    </div>
-                )}
-            </div>
-        </div>
-
-        <div className="w-24 h-24 bg-indigo-600 rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-indigo-500/20 rotate-12 flex-shrink-0">
-            <Trophy size={48} className="text-white -rotate-12" />
-        </div>
-        
-        <h1 className="text-3xl font-black text-gray-900 dark:text-white mb-2 tracking-tight">{t('startTitle')}</h1>
-        <p className="text-gray-500 dark:text-gray-400 mb-8 text-center max-w-xs">{t('startSubtitle')}</p>
-
-        <div className="w-full max-w-sm space-y-4 mb-4">
-            <div>
-                <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-2 ml-1">{t('gameNameLabel')}</label>
-                <div className="flex gap-2">
-                    <input 
-                        type="text"
-                        value={tempGameName}
-                        onChange={(e) => {
-                            setTempGameName(e.target.value);
-                            if (gameNameError) setGameNameError(false);
-                        }}
-                        placeholder={t('gameNamePlaceholder')}
-                        className={`w-full bg-white dark:bg-gray-800 border rounded-xl p-4 text-gray-900 dark:text-white focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600 font-medium shadow-sm transition-all duration-200 ${
-                            gameNameError 
-                            ? 'border-red-500 ring-2 ring-red-500 animate-shake bg-red-50 dark:bg-red-900/10' 
-                            : 'border-gray-300 dark:border-gray-700 focus:border-indigo-500'
-                        }`}
-                    />
-                     <button 
-                        onClick={handleSavePreset}
-                        disabled={!tempGameName.trim()}
-                        className="bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl px-4 text-gray-400 hover:text-indigo-600 dark:hover:text-white hover:border-indigo-500 disabled:opacity-50 shadow-sm"
-                        title={t('saveAsPreset')}
-                     >
-                         <Save size={20} />
-                     </button>
-                </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-                <div>
-                     <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-2 ml-1">{t('targetScoreLabel')}</label>
-                     <input 
-                        type="number"
-                        value={tempTargetScore}
-                        onChange={(e) => setTempTargetScore(e.target.value)}
-                        placeholder={t('targetScorePlaceholder')}
-                        className="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-4 text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600 font-medium shadow-sm"
-                     />
-                </div>
-                <div>
-                     <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-2 ml-1">{t('maxTurnsLabel')}</label>
-                     <input 
-                        type="number"
-                        value={tempMaxTurns}
-                        min="0"
-                        onChange={(e) => {
-                            const val = parseInt(e.target.value);
-                            if (val < 0) return;
-                            setTempMaxTurns(e.target.value);
-                        }}
-                        placeholder="∞"
-                        className="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-4 text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600 font-medium shadow-sm"
-                     />
-                </div>
-            </div>
-
-            {players.length > 0 && (
-              <div className="bg-indigo-50 dark:bg-gray-800/50 p-3 rounded-xl border border-indigo-100 dark:border-gray-700 flex items-center gap-2 text-sm text-indigo-600 dark:text-indigo-400">
-                <Users size={16} />
-                <span>{t('loadedConfig')} <b>{players.length}</b> {t('playersCount')}</span>
-              </div>
-            )}
-
-            <Button fullWidth onClick={startGame} className="mt-4">
-                {t('startGame')}
-            </Button>
-
-            <div className="relative py-4">
-                <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-gray-200 dark:border-gray-800"></div>
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                    <span className="bg-gray-50 dark:bg-gray-900 px-2 text-gray-400">{t('orSelect')}</span>
-                </div>
-            </div>
-
-            <Button 
-                variant="secondary" 
-                fullWidth 
-                onClick={() => {
-                    setIsCreatingPreset(false);
-                    setLibraryFilter('ALL');
-                    setIsPresetsOpen(true);
-                }}
-                className="flex items-center justify-center gap-2"
-            >
-                <Library size={20} /> {t('myGames')}
-            </Button>
-            
-            {savedGames.length > 0 && (
-                <div className="mt-8 w-full">
-                    <div className="flex items-center gap-2 mb-4 text-gray-500 dark:text-gray-500 text-sm font-bold uppercase tracking-wider">
-                         <Archive size={14} /> {t('recentGames')}
-                    </div>
-                    <div className="space-y-2">
-                        {savedGames.slice(0, 5).map(game => (
-                             <div 
-                                key={game.id}
-                                onClick={() => requestLoadGame(game)}
-                                className="w-full bg-white dark:bg-gray-800/50 p-3 rounded-lg border border-gray-200 dark:border-gray-700/50 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-left shadow-sm cursor-pointer group"
-                            >
-                                <div className="min-w-0 flex-1 mr-2">
-                                    <div className="font-bold text-gray-900 dark:text-white text-sm truncate">{game.name}</div>
-                                    <div className="text-xs text-gray-500 flex items-center gap-3 mt-1 flex-wrap">
-                                        <span className="whitespace-nowrap">{new Date(game.date).toLocaleDateString()}</span>
-                                        <span className="flex items-center gap-1 text-gray-400 dark:text-gray-500"><Users size={12} /> {game.players.length}</span>
-                                        {game.settings.targetScore && (
-                                            <span className="flex items-center gap-1 text-indigo-500/80"><Trophy size={12} /> {game.settings.targetScore}</span>
-                                        )}
-                                        {game.settings.maxTurns && (
-                                            <span className="flex items-center gap-1 text-orange-500/80"><Hourglass size={12} /> {game.settings.maxTurns}</span>
-                                        )}
-                                    </div>
-                                </div>
-                                <div className="flex items-center gap-2 shrink-0">
-                                    <button
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            handleDeleteSave(game.id);
-                                        }}
-                                        className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
-                                        title={t('delete')}
-                                    >
-                                        <Trash2 size={16} />
-                                    </button>
-                                    <div className="text-indigo-500 dark:text-indigo-400 rtl:rotate-180">
-                                        <ChevronRight size={16} />
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-        </div>
-
-        {/* Presets Modal */}
-        {isPresetsOpen && (
-             <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setIsPresetsOpen(false)} />
-                <div className="relative bg-white dark:bg-gray-900 text-gray-900 dark:text-white p-5 rounded-2xl w-full max-w-sm border border-gray-200 dark:border-gray-700 h-auto max-h-[90vh] flex flex-col shadow-2xl">
-                    <div className="flex justify-between items-center mb-3 shrink-0 border-b border-gray-200 dark:border-gray-800 pb-2">
-                        <h3 className="text-xl font-bold flex items-center gap-2">
-                            {isCreatingPreset ? (
-                                <button onClick={() => {
-                                    setIsCreatingPreset(false);
-                                    setEditingPresetId(null);
-                                }} className="mr-1 text-gray-400 hover:text-gray-900 dark:hover:text-white rtl:rotate-180">
-                                    <ArrowLeft size={20} />
-                                </button>
-                            ) : (
-                                <LayoutTemplate size={20} />
-                            )}
-                            {isCreatingPreset ? (editingPresetId ? t('editGame') : t('newGame')) : t('library')}
-                        </h3>
-                        <div className="flex gap-2">
-                            {!isCreatingPreset && (
-                                <button 
-                                    onClick={() => {
-                                        setPresetFormName('');
-                                        setPresetFormTarget('');
-                                        setPresetFormMaxTurns('');
-                                        setPresetPlayerCount(3);
-                                        setPresetPlayerNames('');
-                                        setPresetFormCategory(libraryFilter === 'ALL' ? 'BOARD' : libraryFilter);
-                                        setEditingPresetId(null);
-                                        setIsCreatingPreset(true);
-                                    }}
-                                    className="text-indigo-600 dark:text-indigo-400 hover:text-indigo-500 p-1 bg-indigo-50 dark:bg-indigo-900/30 rounded-lg"
-                                    title={t('add')}
-                                >
-                                    <Plus size={20} />
-                                </button>
-                            )}
-                            <button 
-                                onClick={() => setIsPresetsOpen(false)}
-                                className="text-gray-400 hover:text-gray-900 dark:hover:text-white"
-                            >
-                                <X size={24} />
-                            </button>
-                        </div>
-                    </div>
-
-                    {!isCreatingPreset && (
-                        <div className="flex gap-2 mb-3 overflow-x-auto pb-1 scrollbar-hide">
-                            <button 
-                                onClick={() => setLibraryFilter('ALL')}
-                                className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${libraryFilter === 'ALL' ? 'bg-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'}`}
-                            >
-                                {t('all')}
-                            </button>
-                            <button 
-                                onClick={() => setLibraryFilter('BOARD')}
-                                className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors flex items-center gap-1 ${libraryFilter === 'BOARD' ? 'bg-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'}`}
-                            >
-                                <Dices size={12} /> {t('boardGame')}
-                            </button>
-                            <button 
-                                onClick={() => setLibraryFilter('CARD')}
-                                className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors flex items-center gap-1 ${libraryFilter === 'CARD' ? 'bg-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'}`}
-                            >
-                                <CreditCard size={12} /> {t('cardGame')}
-                            </button>
-                             <button 
-                                onClick={() => setLibraryFilter('OTHER')}
-                                className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors flex items-center gap-1 ${libraryFilter === 'OTHER' ? 'bg-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'}`}
-                            >
-                                <Box size={12} /> {t('other')}
-                            </button>
-                        </div>
-                    )}
-                    
-                    <div className="flex-1 overflow-y-auto">
-                    {isCreatingPreset ? (
-                        <div className="flex flex-col gap-3 animate-in fade-in slide-in-from-right-4 duration-200">
-                            
-                            <div className="flex items-center justify-between mb-1">
-                                <span className="text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider">{t('category')}</span>
-                                <button 
-                                    onClick={cyclePresetCategory}
-                                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-xs font-bold text-indigo-600 dark:text-indigo-300 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-indigo-700 dark:hover:text-white transition-colors"
-                                >
-                                    <Folder size={14} className="text-yellow-500" />
-                                    {getCategoryLabel(presetFormCategory)}
-                                </button>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-3">
-                                <div className="col-span-2 sm:col-span-1">
-                                    <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-1">{t('gameNameLabel')}</label>
-                                    <input 
-                                        type="text"
-                                        value={presetFormName}
-                                        onChange={(e) => setPresetFormName(e.target.value)}
-                                        placeholder="Ej: Poker"
-                                        autoFocus
-                                        className="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-2.5 text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600 text-sm"
-                                    />
-                                </div>
-                                <div className="col-span-2 sm:col-span-1">
-                                    <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-1">{t('objective')} (Pts)</label>
-                                    <input 
-                                        type="number"
-                                        value={presetFormTarget}
-                                        onChange={(e) => setPresetFormTarget(e.target.value)}
-                                        placeholder={t('targetScorePlaceholder')}
-                                        className="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-2.5 text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600 text-sm"
-                                    />
-                                </div>
-                                <div className="col-span-2 sm:col-span-1">
-                                    <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-1">{t('maxTurnsLabel')}</label>
-                                    <input 
-                                        type="number"
-                                        value={presetFormMaxTurns}
-                                        onChange={(e) => setPresetFormMaxTurns(e.target.value)}
-                                        placeholder="∞"
-                                        className="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-2.5 text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600 text-sm"
-                                    />
-                                </div>
-                            </div>
-
-                            <div>
-                                <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-1">{t('howManyPlayers')}</label>
-                                <div className="grid grid-cols-6 gap-2">
-                                    {[2,3,4,5,6].map(num => (
-                                        <button 
-                                            key={num}
-                                            onClick={() => setPresetPlayerCount(num)}
-                                            className={`py-2 rounded-lg font-bold text-sm border transition-colors ${presetPlayerCount === num ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}`}
-                                        >
-                                            {num}
-                                        </button>
-                                    ))}
-                                    <button
-                                        onClick={() => setPresetPlayerCount(c => c < 6 ? 7 : c + 1)}
-                                        className={`flex items-center justify-center font-bold text-sm border rounded-lg transition-colors ${presetPlayerCount > 6 ? 'bg-indigo-600 border-indigo-600 text-white' : 'text-gray-400 border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'}`}
-                                    >
-                                        {presetPlayerCount > 6 ? presetPlayerCount : '+'}
-                                    </button>
-                                </div>
-                            </div>
-                            
-                            <div>
-                                <label className="block text-gray-500 dark:text-gray-400 text-xs font-bold uppercase tracking-wider mb-1">{t('player')}s (Comma sep)</label>
-                                <input 
-                                    type="text"
-                                    value={presetPlayerNames}
-                                    onChange={(e) => setPresetPlayerNames(e.target.value)}
-                                    placeholder="Juan, Maria, Pedro..."
-                                    className="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-2.5 text-gray-900 dark:text-white focus:border-indigo-500 focus:outline-none placeholder:text-gray-400 dark:placeholder:text-gray-600 text-sm"
-                                />
-                            </div>
-
-                            <Button fullWidth onClick={handleSavePresetForm} disabled={!presetFormName.trim()} className="mt-2">
-                                {t('save')}
-                            </Button>
-                        </div>
-                    ) : (
-                        <div className="space-y-2 pb-2">
-                            {gamePresets.filter(p => libraryFilter === 'ALL' || p.category === libraryFilter).length === 0 ? (
-                                <div className="text-center py-8 text-gray-400 dark:text-gray-600 italic text-sm">
-                                    {t('noPresets')}
-                                </div>
-                            ) : (
-                                gamePresets
-                                .filter(p => libraryFilter === 'ALL' || p.category === libraryFilter)
-                                .map(preset => (
-                                    <div 
-                                        key={preset.id}
-                                        onClick={() => handleLoadPreset(preset)}
-                                        className="group w-full bg-white dark:bg-gray-800/50 p-3 rounded-xl border border-gray-200 dark:border-gray-700/50 flex items-center justify-between hover:bg-indigo-50 dark:hover:bg-indigo-900/10 hover:border-indigo-200 dark:hover:border-indigo-800/50 transition-all cursor-pointer shadow-sm active:scale-[0.98]"
-                                    >
-                                        <div className="flex items-center gap-3">
-                                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-white shadow-md ${preset.category === 'CARD' ? 'bg-pink-500' : preset.category === 'BOARD' ? 'bg-indigo-500' : 'bg-orange-500'}`}>
-                                                {preset.category === 'CARD' && <CreditCard size={18} />}
-                                                {preset.category === 'BOARD' && <Dices size={18} />}
-                                                {preset.category === 'OTHER' && <Box size={18} />}
-                                            </div>
-                                            <div className="text-left">
-                                                <div className="font-bold text-gray-900 dark:text-white text-sm">{preset.name}</div>
-                                                <div className="text-xs text-gray-500 flex items-center gap-2">
-                                                    <span className="flex items-center gap-0.5"><Users size={10} /> {preset.defaultPlayerCount || 3}</span>
-                                                    {preset.defaultTargetScore && <span className="flex items-center gap-0.5"><Trophy size={10} /> {preset.defaultTargetScore}</span>}
-                                                    {preset.defaultMaxTurns && <span className="flex items-center gap-0.5"><Hourglass size={10} /> {preset.defaultMaxTurns}</span>}
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="flex gap-1 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity">
-                                             <button 
-                                                onClick={(e) => handleEditPreset(preset, e)}
-                                                className="p-2 text-gray-400 hover:text-indigo-600 hover:bg-white dark:hover:bg-gray-700 rounded-lg"
-                                             >
-                                                <Pencil size={16} />
-                                            </button>
-                                            <button 
-                                                onClick={(e) => handleDeletePreset(preset.id, e)}
-                                                className="p-2 text-gray-400 hover:text-red-500 hover:bg-white dark:hover:bg-gray-700 rounded-lg"
-                                             >
-                                                <Trash2 size={16} />
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                    )}
-                    </div>
-                </div>
-            </div>
-        )}
-    </div>
-  );
-
-  const renderListScreen = () => (
-    <div className="h-full flex flex-col bg-gray-50 dark:bg-gray-900">
-        <header className="bg-white dark:bg-gray-800 shadow-sm px-4 py-4 z-10">
-            <div className="flex justify-between items-center mb-4 gap-2">
-                <button onClick={requestFullReset} className="text-gray-400 hover:text-gray-900 dark:hover:text-white shrink-0">
-                    <ArrowLeft size={24} />
-                </button>
-                <div className="text-center min-w-0 flex-1">
-                    <h1 className="text-xl font-black text-gray-900 dark:text-white truncate">{gameName}</h1>
-                    <div className="flex gap-3 justify-center">
-                        {settings.targetScore && (
-                            <div className="text-xs font-medium text-indigo-500 flex items-center justify-center gap-1">
-                                <Trophy size={12} /> {settings.targetScore}
-                            </div>
-                        )}
-                        {settings.maxTurns && (
-                            <div className="text-xs font-medium text-orange-500 flex items-center justify-center gap-1">
-                                <Hourglass size={12} /> {t('rounds')} {Math.floor(players.length > 0 ? (players[0].history.length) : 0)}/{settings.maxTurns}
-                            </div>
-                        )}
-                    </div>
-                </div>
-                <div className="flex gap-2 shrink-0">
-                    <button 
-                        onClick={() => {
-                            setIsExtrasOpen(true);
-                            setActiveTool('MENU');
-                        }}
-                        className="text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 p-2 rounded-full"
-                        title={t('extras')}
-                    >
-                        <Zap size={24} />
-                    </button>
-                    <button 
-                        onClick={() => setIsReordering(!isReordering)}
-                        className={`text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 p-2 rounded-full ${isReordering ? 'bg-indigo-100 dark:bg-indigo-900/50' : ''}`}
-                        title={t('reorder')}
-                    >
-                        <ArrowUpDown size={24} />
-                    </button>
-                    <button onClick={handleShareGame} className="text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 p-2 rounded-full">
-                        <Share2 size={24} />
-                    </button>
-                    <button onClick={openAddPlayerDialog} className="text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 p-2 rounded-full">
-                        <UserPlus size={24} />
-                    </button>
-                </div>
-            </div>
-            
-            {/* Top Leaderboard Summary */}
-            <div className="flex gap-4 overflow-x-auto pb-2 px-1 scrollbar-hide snap-x">
-                {[...players].sort((a,b) => b.totalScore - a.totalScore).map((p, i) => (
-                    <div key={p.id} className="flex flex-col items-center min-w-[60px] snap-start">
-                        <div className={`relative w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-sm shadow-md mb-1 ${p.color}`}>
-                            {i === 0 && <Crown size={14} className="absolute -top-1 -right-1 text-yellow-300 fill-yellow-300" />}
-                            {getPlayerInitials(p.name)}
-                        </div>
-                        <span className="text-xs font-bold text-gray-900 dark:text-white">{p.totalScore}</span>
-                    </div>
-                ))}
-            </div>
-        </header>
-
-        <main className="flex-1 overflow-y-auto p-4 space-y-3 pb-24">
-            {players.map((player, index) => (
-                <div 
-                    key={player.id}
-                    onClick={() => !isReordering && selectPlayer(player.id)}
-                    className={`bg-white dark:bg-gray-800 rounded-2xl p-4 shadow-sm border border-gray-100 dark:border-gray-700 flex items-center justify-between active:scale-[0.98] transition-all relative overflow-hidden group ${isReordering ? 'cursor-default' : 'cursor-pointer'} ${getActivePlayerId() === player.id && !isReordering ? 'ring-2 ring-indigo-500 dark:ring-indigo-400 bg-indigo-50/50 dark:bg-indigo-900/10' : ''}`}
-                >
-                     {/* Color indicator bar */}
-                    <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${player.color}`}></div>
-
-                    <div className="flex items-center gap-4 pl-2 overflow-hidden flex-1">
-                        <div className={`relative w-12 h-12 rounded-xl flex items-center justify-center text-white font-bold text-sm shadow-md shrink-0 ${player.color}`}>
-                            {getPlayerInitials(player.name)}
-                            {getActivePlayerId() === player.id && !isReordering && (
-                                <div className="absolute -top-1 -right-1 bg-white dark:bg-gray-800 rounded-full p-0.5">
-                                    <Play size={14} className="text-indigo-600 dark:text-indigo-400 fill-indigo-600 dark:fill-indigo-400" />
-                                </div>
-                            )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                                <h3 className="font-bold text-lg text-gray-900 dark:text-white truncate">{player.name}</h3>
-                                {/* Edit Button integrated here to avoid overlap */}
-                                {!isReordering && (
-                                    <button 
-                                        onClick={(e) => openEditPlayerDialog(player, e)}
-                                        className="p-1.5 bg-gray-100 dark:bg-gray-700/50 rounded-lg text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors shrink-0"
-                                    >
-                                        <Pencil size={14} />
-                                    </button>
-                                )}
-                            </div>
-                            <div className="text-xs text-gray-500 dark:text-gray-400 font-medium flex items-center gap-2 mt-0.5">
-                                <span>{t('turns')}: {player.history.length}</span>
-                                {player.history.length > 0 && (
-                                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${player.history[0].amount > 0 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'}`}>
-                                        {player.history[0].amount > 0 ? '+' : ''}{player.history[0].amount}
-                                    </span>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                    
-                    {isReordering ? (
-                         <div className="flex items-center gap-2 shrink-0 pl-2" onClick={e => e.stopPropagation()}>
-                             {/* Locking logic: If who starts was used, index 0 is locked. */}
-                             {hasUsedWhoStarts && index === 0 && (
-                                 <Lock size={16} className="text-gray-400 mr-2" />
-                             )}
-                             <button 
-                                onClick={() => movePlayer(index, 'up')}
-                                disabled={index === 0 || (hasUsedWhoStarts && index === 1)} // Cannot move up if top, or if second and top is locked
-                                className="p-2 bg-gray-100 dark:bg-gray-700 rounded-lg disabled:opacity-30 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
-                             >
-                                 <ArrowUp size={20} />
-                             </button>
-                             <button 
-                                onClick={() => movePlayer(index, 'down')}
-                                disabled={index === players.length - 1 || (hasUsedWhoStarts && index === 0)} // Cannot move down if last, or if top and locked
-                                className="p-2 bg-gray-100 dark:bg-gray-700 rounded-lg disabled:opacity-30 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
-                             >
-                                 <ArrowDown size={20} />
-                             </button>
-                        </div>
-                    ) : (
-                        <div className="flex items-center gap-4 shrink-0 pl-2">
-                            <div className="text-3xl font-black text-indigo-600 dark:text-indigo-400 tabular-nums tracking-tight">
-                                {player.totalScore}
-                            </div>
-                            <ChevronRight size={20} className="text-gray-300 dark:text-gray-600 rtl:rotate-180" />
-                        </div>
-                    )}
-                </div>
-            ))}
-            
-            {players.length === 0 && (
-                <div className="text-center text-gray-400 dark:text-gray-600 mt-10">
-                    <UserPlus size={48} className="mx-auto mb-4 opacity-20" />
-                    <p>{t('addPlayer')}</p>
-                </div>
-            )}
-        </main>
-
-        {/* Bottom Actions */}
-        <div className="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 p-4 pb-8 shadow-lg z-20 space-y-3">
-             <div className="grid grid-cols-2 gap-3">
-                 {players.some(p => p.history.length > 0) ? (
-                     <button 
-                        onClick={requestResetGame}
-                        className="flex items-center justify-center gap-2 py-3 rounded-xl font-bold bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
-                     >
-                         <RotateCcw size={18} /> {t('resetScores')}
-                     </button>
-                 ) : (
-                     <button 
-                        onClick={() => {
-                            if (hasUsedWhoStarts) return;
-                            setIsExtrasOpen(true);
-                            setActiveTool('PICKER');
-                            setPickerDone(false);
-                            setPickerId(null);
-                        }}
-                        disabled={hasUsedWhoStarts}
-                        className={`flex items-center justify-center gap-2 py-3 rounded-xl font-bold transition-colors ${hasUsedWhoStarts ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 cursor-not-allowed opacity-60' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
-                     >
-                         <Users size={18} /> {t('whoStarts')}
-                     </button>
-                 )}
-                 <button 
-                    onClick={handleSaveGame}
-                    className="flex items-center justify-center gap-2 py-3 rounded-xl font-bold bg-indigo-600 text-white shadow-lg shadow-indigo-500/30 hover:bg-indigo-500 transition-colors"
-                 >
-                     <Save size={18} /> {t('game')}
-                 </button>
-             </div>
-             {/* Start / End Game Button Logic */}
-             <button 
-                onClick={() => {
-                     const hasGameStarted = players.some(p => p.history.length > 0);
-                     if (hasGameStarted) {
-                         handleEndGame();
-                     } else {
-                         if (players.length > 0) {
-                             selectPlayer(players[0].id);
-                         }
-                     }
-                }}
-                className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-bold shadow-lg transition-colors ${players.some(p => p.history.length > 0) ? 'bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-gray-100' : 'bg-green-600 text-white hover:bg-green-500 shadow-green-500/30'}`}
-             >
-                 {players.some(p => p.history.length > 0) ? <Flag size={18} /> : <Play size={18} />} 
-                 {players.some(p => p.history.length > 0) ? t('endGame') : t('startGame')}
-             </button>
-        </div>
-    </div>
-  );
-
-  const renderScoringScreen = () => {
-    const player = players.find(p => p.id === selectedPlayerId);
-    if (!player) return null;
-
-    const textColorClass = TEXT_COLORS[player.color] || 'text-gray-900 dark:text-white';
-    
-    // Check if it is this player's turn
-    const activePlayerId = getActivePlayerId();
-    const isTurn = activePlayerId === player.id;
-    const activePlayer = players.find(p => p.id === activePlayerId);
-
-    return (
-      <div className="h-full flex flex-col bg-gray-50 dark:bg-gray-900">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 bg-white dark:bg-gray-800 shadow-sm shrink-0 z-10">
-          <button onClick={() => setView('LIST')} className="p-2 -ml-2 text-gray-600 dark:text-gray-300 shrink-0">
-            <ArrowLeft size={24} className="rtl:rotate-180" />
-          </button>
-          
-          <div className="flex items-center gap-4 min-w-0 flex-1 justify-center">
-              <button onClick={() => navigatePlayer('prev')} className="p-2 text-gray-400 hover:text-gray-900 dark:hover:text-white shrink-0">
-                  <ChevronLeft size={24} className="rtl:rotate-180" />
-              </button>
-              <div className="flex flex-col items-center min-w-0">
-                 <span className="text-xs uppercase font-bold text-gray-400 tracking-wider whitespace-nowrap">{t('turnOf')}</span>
-                 <h2 className={`text-xl font-black ${textColorClass} truncate max-w-[150px]`}>{player.name}</h2>
-              </div>
-              <button onClick={() => navigatePlayer('next')} className="p-2 text-gray-400 hover:text-gray-900 dark:hover:text-white shrink-0">
-                  <ChevronRight size={24} className="rtl:rotate-180" />
-              </button>
-          </div>
-
-          <div className="flex items-center gap-1 shrink-0">
-            <button onClick={() => { setIsExtrasOpen(true); setActiveTool('MENU'); }} className="p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full">
-                 <Zap size={24} />
-            </button>
-            <button onClick={() => setIsPlayerHistoryOpen(true)} className="p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full">
-                <FileSearch size={24} />
-            </button>
-          </div>
-        </div>
-        
-        {/* Horizontal Player Scores */}
-        <div 
-            ref={scoringPlayerScrollRef}
-            className="flex gap-3 overflow-x-auto py-3 px-4 shrink-0 bg-gray-50 dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 scrollbar-hide snap-x"
-        >
-            {[...players].sort((a,b) => b.totalScore - a.totalScore).map(p => (
-                <div 
-                    key={p.id} 
-                    id={`score-player-${p.id}`}
-                    onClick={() => selectPlayer(p.id)}
-                    className={`flex flex-col items-center min-w-[60px] cursor-pointer snap-start transition-all duration-200 ${p.id === selectedPlayerId ? 'scale-110 opacity-100' : 'opacity-60 grayscale scale-95'}`}
-                >
-                    <div className={`w-12 h-12 rounded-full ${p.color} flex items-center justify-center text-white text-lg font-bold shadow-sm mb-1 ring-2 ${p.id === selectedPlayerId ? 'ring-gray-900 dark:ring-white' : 'ring-transparent'}`}>
-                        {getPlayerInitials(p.name)}
-                    </div>
-                    <span className="text-sm font-bold text-gray-900 dark:text-white tabular-nums">
-                        {p.totalScore}
-                    </span>
-                </div>
-            ))}
-        </div>
-
-        {/* Content Area */}
-        <div className="flex-1 overflow-y-auto flex flex-col p-4 pb-safe relative">
-            
-            {/* Warning Overlay if not turn */}
-            {!isTurn && (
-                <div className="absolute inset-x-0 top-0 z-20 flex justify-center pt-2 px-4">
-                    <button 
-                        onClick={() => activePlayer && selectPlayer(activePlayer.id)}
-                        className="bg-red-500/90 hover:bg-red-600 text-white px-4 py-2 rounded-full shadow-lg text-sm font-bold flex items-center gap-2 animate-in slide-in-from-top-4 fade-in transition-transform active:scale-95 cursor-pointer"
-                    >
-                        <Lock size={14} /> 
-                        <span>{t('notYourTurn')}</span>
-                        {activePlayer && <span className="opacity-80 font-normal">- {t('turnOfPlayer')} {activePlayer.name}</span>}
-                    </button>
-                </div>
-            )}
-            
-            {/* Combined Total and Input Display */}
-            <div className={`bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 p-4 mb-4 flex items-center justify-between relative overflow-hidden shrink-0 ${!isTurn ? 'opacity-50' : ''}`}>
-                 {/* Progress Bar Background */}
-                 {settings.targetScore && (
-                     <div className="absolute bottom-0 left-0 right-0 h-1 bg-gray-100 dark:bg-gray-700">
-                        <div 
-                            className={`h-full ${player.color} transition-all duration-500`}
-                            style={{ width: `${Math.min(100, ((player.totalScore + currentTurnScore) / settings.targetScore) * 100)}%` }}
-                        ></div>
-                     </div>
-                 )}
-
-                 {/* Left: Total */}
-                 <div className="flex-1 text-center">
-                     <span className="text-xs uppercase text-gray-400 font-bold mb-1 block">{t('total')}</span>
-                     <div className={`text-4xl font-black ${textColorClass}`}>
-                         {player.totalScore + currentTurnScore}
-                     </div>
-                 </div>
-
-                 {/* Divider */}
-                 <div className="w-px h-12 bg-gray-200 dark:bg-gray-700 mx-4"></div>
-
-                 {/* Right: Add (Input) */}
-                 <div className="flex-1 text-center">
-                     <span className="text-xs uppercase text-gray-400 font-bold mb-1 block">{t('points')}</span>
-                     <div className={`text-4xl font-black ${currentTurnScore === 0 ? 'text-gray-300 dark:text-gray-600' : (currentTurnScore > 0 ? 'text-green-500' : 'text-red-500')}`}>
-                        {currentTurnScore > 0 ? '+' : ''}{currentTurnScore}
-                     </div>
-                 </div>
-            </div>
-
-            {/* Spacer to push controls to bottom if screen is tall */}
-            <div className="flex-1"></div>
-
-            {/* Quick Add Buttons */}
-            <div className={`grid grid-cols-4 gap-2 mb-2 shrink-0 ${!isTurn ? 'opacity-40 pointer-events-none grayscale' : ''}`}>
-                {[1, 5, 10, 50].map(amt => (
-                    <button
-                        key={amt}
-                        onClick={() => handleQuickAdd(amt)}
-                        className="py-3 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-black text-lg hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors shadow-sm"
-                    >
-                        +{amt}
-                    </button>
-                ))}
-            </div>
-            <div className={`grid grid-cols-4 gap-2 mb-4 shrink-0 ${!isTurn ? 'opacity-40 pointer-events-none grayscale' : ''}`}>
-                {[-1, -5, -10, -50].map(amt => (
-                    <button
-                        key={amt}
-                        onClick={() => handleQuickAdd(amt)}
-                        className="py-3 rounded-lg bg-red-50 dark:bg-red-900/10 text-red-500 dark:text-red-400 font-black text-lg hover:bg-red-100 dark:hover:bg-red-900/20 transition-colors shadow-sm"
-                    >
-                        {amt}
-                    </button>
-                ))}
-            </div>
-
-            {/* Keypad Section */}
-            <div className={`mb-4 shrink-0 ${!isTurn ? 'opacity-40 pointer-events-none grayscale' : ''}`}>
-                <Keypad 
-                    onKeyPress={handleKeypadPress}
-                    onDelete={handleKeypadDelete}
-                    onClear={() => setCurrentTurnScore(0)}
-                />
-            </div>
-
-            <Button 
-                fullWidth 
-                variant={currentTurnScore === 0 ? "secondary" : "primary"}
-                onClick={currentTurnScore === 0 ? () => setConfirmationState({ isOpen: true, type: 'PASS_TURN' }) : commitTurn}
-                disabled={!isTurn}
-                className={`py-4 text-lg shadow-xl shrink-0 ${currentTurnScore === 0 ? 'bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400' : 'shadow-indigo-500/30 animate-pulse'} ${!isTurn ? 'opacity-50 cursor-not-allowed' : ''}`}
-            >
-                 {currentTurnScore === 0 ? t('passTurn') : t('applyAndNext')}
-            </Button>
-        </div>
-      </div>
-    );
-  };
-
-  const renderVictoryScreen = () => {
-    const winner = winnerId ? players.find(p => p.id === winnerId) : null;
-    const sortedPlayers = [...players].sort((a, b) => b.totalScore - a.totalScore);
-    
-    return (
-        <div className="h-full flex flex-col items-center justify-center p-6 bg-gray-900 text-white relative overflow-hidden animate-in fade-in duration-500">
-             {/* Background Effects */}
-             <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-indigo-900/50 via-gray-900 to-black pointer-events-none"></div>
-             
-             {/* Content */}
-             <div className="relative z-10 flex flex-col items-center text-center w-full max-w-sm flex-1 overflow-y-auto py-8 scrollbar-hide">
-                 <div className="mb-8 relative shrink-0">
-                     <div className="absolute inset-0 bg-yellow-400 blur-3xl opacity-20 animate-pulse"></div>
-                     <Trophy size={80} className="text-yellow-400 relative z-10 animate-bounce" />
-                     <Crown size={40} className="text-yellow-200 absolute -top-6 -right-2 rotate-12 z-20" />
-                 </div>
-
-                 <h2 className="text-gray-400 font-bold uppercase tracking-[0.2em] mb-4 text-sm">{t('winner')}</h2>
-                 
-                 {winner && (
-                     <div className="mb-8 animate-in zoom-in slide-in-from-bottom-8 duration-700 shrink-0">
-                         <h1 className={`text-5xl font-black mb-4 bg-clip-text text-transparent bg-gradient-to-r from-yellow-200 via-yellow-400 to-yellow-600 drop-shadow-sm`}>
-                             {winner.name}
-                         </h1>
-                         <div className="inline-block bg-white/10 px-6 py-2 rounded-full backdrop-blur-md border border-white/10">
-                             <span className="text-3xl font-bold">{winner.totalScore}</span> <span className="text-sm opacity-70">PTS</span>
-                         </div>
-                     </div>
-                 )}
-                 
-                 {/* Leaderboard */}
-                 <div className="w-full bg-white/5 rounded-2xl p-4 mb-8 border border-white/10 backdrop-blur-sm animate-in slide-in-from-bottom-12 duration-1000">
-                     {sortedPlayers.map((p, i) => (
-                         <div key={p.id} className="flex items-center justify-between py-2 border-b border-white/10 last:border-0">
-                             <div className="flex items-center gap-3">
-                                 <span className="font-mono text-gray-500 text-sm font-bold w-4">{i + 1}.</span>
-                                 <div className={`w-6 h-6 rounded-full ${p.color}`}></div>
-                                 <span className={`font-bold ${p.id === winnerId ? 'text-yellow-400' : 'text-gray-300'}`}>{p.name}</span>
-                             </div>
-                             <span className="font-bold font-mono">{p.totalScore}</span>
-                         </div>
-                     ))}
-                 </div>
-
-                 <div className="w-full space-y-3 mt-auto shrink-0">
-                     <Button fullWidth onClick={handleShareGame} className="bg-green-600 hover:bg-green-500 text-white border-0 shadow-lg shadow-green-500/20">
-                         <Share2 size={18} /> {t('share')}
-                     </Button>
-                     <Button fullWidth variant="primary" onClick={() => setView('LIST')}>
-                         {t('continuePlaying')}
-                     </Button>
-                     <Button fullWidth variant="secondary" onClick={requestResetGame} className="bg-white/10 hover:bg-white/20 text-white border-0">
-                         {t('newGameSame')}
-                     </Button>
-                     <Button fullWidth variant="ghost" onClick={requestFullReset} className="text-gray-500 hover:text-white hover:bg-transparent">
-                         {t('backToStart')}
-                     </Button>
-                 </div>
-             </div>
-        </div>
-    );
-  };
-
   return (
-    <div className="h-full w-full bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white select-none relative">
-       {/* Splash Screen Overlay */}
-       {renderSplashScreen()}
+    <div className="h-full w-full bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white overflow-hidden font-sans select-none fixed inset-0">
+      <SplashScreen 
+        showSplash={showSplash}
+        splashFading={splashFading}
+        dontShowSplashAgain={dontShowSplashAgain}
+        onDismiss={handleDismissSplash}
+        onToggleDontShow={toggleDontShowSplash}
+      />
+      
+      <ConfirmationModal 
+        isOpen={confirmationState.isOpen}
+        type={confirmationState.type}
+        onClose={() => setConfirmationState({ isOpen: false, type: null })}
+        onConfirm={executeConfirmation}
+        t={t as any}
+      />
 
-       {/* Main App */}
-       {view === 'START' && renderStartScreen()}
-       {view === 'LIST' && renderListScreen()}
-       {view === 'SCORING' && renderScoringScreen()}
-       {view === 'VICTORY' && renderVictoryScreen()}
+      <PlayerHistoryModal 
+        isOpen={isPlayerHistoryOpen}
+        player={players.find(p => p.id === selectedPlayerId)}
+        onClose={() => setIsPlayerHistoryOpen(false)}
+        onNavigate={navigatePlayer}
+        getPlayerInitials={getPlayerInitials}
+        t={t as any}
+      />
 
-       {renderPlayerDialog()}
-       {renderExtrasModal()}
-       <AboutModal isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} t={t} />
-       {renderConfirmationModal()}
-       {renderPlayerHistoryModal()}
-       {renderSetupWizard()}
+      <ExtrasModal 
+        isOpen={isExtrasOpen}
+        activeTool={activeTool}
+        setActiveTool={setActiveTool}
+        onClose={() => setIsExtrasOpen(false)}
+        t={t as any}
+        diceSides={diceSides} setDiceSides={setDiceSides} 
+        diceCount={diceCount} setDiceCount={setDiceCount}
+        diceResults={diceResults} isRolling={isRolling} onRollDice={handleRollDice}
+        coinResult={coinResult} isFlipping={isFlipping} onFlipCoin={handleFlipCoin}
+        timerLeft={timerLeft} setTimerLeft={setTimerLeft} isTimerActive={isTimerActive} setIsTimerActive={setIsTimerActive} timerStartValue={timerStartValue} setTimerStartValue={setTimerStartValue} formatTime={formatTime}
+        players={players} pickerId={pickerId} isPicking={isPicking} pickerDone={pickerDone} onPickPlayer={handlePickPlayer} getPlayerInitials={getPlayerInitials} hasUsedWhoStarts={hasUsedWhoStarts} view={view}
+        chessModeType={chessModeType} setChessModeType={setChessModeType} chessGameState={chessGameState} setChessGameState={setChessGameState} chessConfig={chessConfig} setChessConfig={setChessConfig}
+        chessTime1={chessTime1} setChessTime1={setChessTime1} chessTime2={chessTime2} setChessTime2={setChessTime2} chessActive={chessActive} chessTurnCount={chessTurnCount} suspendedChessState={suspendedChessState}
+        onStartChessGameRequest={startChessGameRequest} onResumeChessGame={resumeChessGame} onRequestSaveChessGame={requestSaveChessGame} handleChessTap={handleChessTap} handleChessExitRequest={handleChessExitRequest}
+      />
 
-       {/* Toast */}
-       {showSaveNotification && (
-           <div className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-gray-900/90 dark:bg-white/90 text-white dark:text-gray-900 px-6 py-3 rounded-full shadow-2xl z-[100] animate-in fade-in slide-in-from-bottom-4 font-bold flex items-center gap-2">
-               <CheckCircle2 size={20} className="text-green-500" />
-               {toastMessage || t('gameSaved')}
-           </div>
-       )}
+      <PlayerDialog 
+        dialogId="add-player-dialog"
+        isEditing={!!editingPlayerId}
+        name={newPlayerName} setName={setNewPlayerName}
+        color={newPlayerColor} setColor={setNewPlayerColor}
+        playersCount={players.length}
+        predefinedColors={PREDEFINED_COLORS}
+        isColorTaken={isColorTaken}
+        onSave={handleSavePlayer}
+        onDelete={() => editingPlayerId && deletePlayer(editingPlayerId)}
+        onClose={() => (document.getElementById('add-player-dialog') as HTMLDialogElement)?.close()}
+        t={t as any}
+      />
+      
+      {setupWizard ? (
+        <SetupWizard 
+          setupWizard={setupWizard}
+          customPlayerCount={customPlayerCount} setCustomPlayerCount={setCustomPlayerCount}
+          showCustomCountInput={showCustomCountInput} setShowCustomCountInput={setShowCustomCountInput}
+          onInitWizardPlayers={initWizardPlayers}
+          onCancel={() => setSetupWizard(null)}
+          wizardPlayerName={wizardPlayerName} setWizardPlayerName={setWizardPlayerName}
+          wizardPlayerColor={wizardPlayerColor} setWizardPlayerColor={setWizardPlayerColor}
+          onNextStep={nextWizardStep}
+          onPrevStep={prevWizardStep}
+          onFinishEarly={finishWizardEarly}
+          predefinedColors={PREDEFINED_COLORS}
+          t={t as any}
+        />
+      ) : (
+          view === 'START' ? (
+            <StartScreen 
+              onOpenAbout={() => setIsAboutOpen(true)}
+              onOpenExtras={() => { setIsExtrasOpen(true); setActiveTool('MENU'); }}
+              language={language} setLanguage={setLanguage} isLangMenuOpen={isLangMenuOpen} setIsLangMenuOpen={setIsLangMenuOpen}
+              tempGameName={tempGameName} setTempGameName={setTempGameName} gameNameError={gameNameError} setGameNameError={setGameNameError}
+              tempTargetScore={tempTargetScore} setTempTargetScore={setTempTargetScore} tempMaxTurns={tempMaxTurns} setTempMaxTurns={setTempMaxTurns}
+              players={players} onStartGame={startGame} onSavePreset={handleSavePreset}
+              savedGames={savedGames} onLoadGame={requestLoadGame} onDeleteSave={handleDeleteSave}
+              isPresetsOpen={isPresetsOpen} setIsPresetsOpen={setIsPresetsOpen}
+              isCreatingPreset={isCreatingPreset} setIsCreatingPreset={setIsCreatingPreset}
+              libraryFilter={libraryFilter} setLibraryFilter={setLibraryFilter}
+              presetModalProps={{
+                editingPresetId, setEditingPresetId,
+                formName: presetFormName, setFormName: setPresetFormName,
+                formTarget: presetFormTarget, setFormTarget: setPresetFormTarget,
+                formMaxTurns: presetFormMaxTurns, setFormMaxTurns: setPresetFormMaxTurns,
+                formCategory: presetFormCategory, setFormCategory: setPresetFormCategory,
+                formPlayerCount: presetPlayerCount, setFormPlayerCount: setPresetPlayerCount,
+                formPlayerNames: presetPlayerNames, setFormPlayerNames: setPresetPlayerNames,
+                onSaveForm: handleSavePresetForm,
+                presets: gamePresets, onLoadPreset: handleLoadPreset, onEditPreset: handleEditPreset, onDeletePreset: handleDeletePreset
+              }}
+              t={t as any}
+              onQuickGame={() => setView('QUICK_GAME')}
+            />
+          ) :
+          view === 'SCORING' ? (
+            <ScoringScreen 
+              selectedPlayerId={selectedPlayerId}
+              players={players}
+              activePlayerId={getActivePlayerId()}
+              currentTurnScore={currentTurnScore}
+              settings={settings}
+              onBackToList={() => setView('LIST')}
+              onNavigatePlayer={navigatePlayer}
+              onOpenExtras={() => { setIsExtrasOpen(true); setActiveTool('MENU'); }}
+              onOpenHistory={() => setIsPlayerHistoryOpen(true)}
+              onSelectPlayer={selectPlayer}
+              onQuickAdd={handleQuickAdd}
+              onKeypadPress={handleKeypadPress}
+              onKeypadDelete={handleKeypadDelete}
+              onKeypadClear={() => setCurrentTurnScore(0)}
+              onCommitTurn={commitTurn}
+              onPassTurnRequest={() => setConfirmationState({ isOpen: true, type: 'PASS_TURN' })}
+              t={t as any}
+              getPlayerInitials={getPlayerInitials}
+              textColors={TEXT_COLORS}
+            />
+          ) :
+          view === 'VICTORY' ? (
+            <VictoryScreen 
+              winnerId={winnerId}
+              players={players}
+              onShare={handleShareGame}
+              onResetGame={() => { setWinnerId(null); setView('LIST'); }}
+              onRequestResetGame={requestResetGame}
+              onRequestFullReset={requestFullReset}
+              t={t as any}
+            />
+          ) :
+          view === 'QUICK_GAME' ? (
+              <QuickGameScreen 
+                onBack={() => setView('START')}
+                t={t as any}
+                predefinedColors={PREDEFINED_COLORS}
+              />
+          ) : (
+            <ListScreen 
+              gameName={gameName}
+              players={players}
+              settings={settings}
+              isReordering={isReordering}
+              setIsReordering={setIsReordering}
+              hasUsedWhoStarts={hasUsedWhoStarts}
+              onBackToStart={requestFullReset}
+              onOpenExtras={() => { setIsExtrasOpen(true); setActiveTool('MENU'); }}
+              onShare={handleShareGame}
+              onAddPlayer={openAddPlayerDialog}
+              onSelectPlayer={(id) => !isReordering && selectPlayer(id)}
+              onEditPlayer={openEditPlayerDialog}
+              onMovePlayer={movePlayer}
+              onReorderPlayers={handleReorderPlayers}
+              onRequestResetGame={requestResetGame}
+              onOpenPicker={() => {
+                  if (hasUsedWhoStarts) return;
+                  setIsExtrasOpen(true);
+                  setActiveTool('PICKER');
+                  setPickerDone(false);
+                  setPickerId(null);
+              }}
+              onSaveGame={handleSaveGame}
+              onEndGame={handleEndGame}
+              t={t as any}
+              getPlayerInitials={getPlayerInitials}
+              getActivePlayerId={getActivePlayerId}
+            />
+          )
+      )}
+      
+      {/* Toast Notification */}
+      {showSaveNotification && (
+          <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[100] animate-in slide-in-from-bottom-5 fade-in duration-300">
+               <div className="bg-gray-900/90 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-3 backdrop-blur-md border border-white/10">
+                   <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                   <span className="font-bold text-sm">{toastMessage || t('gameSaved')}</span>
+               </div>
+          </div>
+      )}
+
+      {/* About Modal - casting t to any to avoid strict type mismatch with interface */}
+      <AboutModal 
+        isOpen={isAboutOpen} 
+        onClose={() => setIsAboutOpen(false)} 
+        t={t as any} 
+        onShowToast={triggerToast}
+      />
     </div>
   );
 }
